@@ -133,19 +133,22 @@ else
 fi
 
 CHAIN="MTPR_SYNFIX"
-SSH_PORT=$(sshd -T 2>/dev/null | grep '^port ' | awk '{print $2}' || echo 22)
-
-if ! iptables -C INPUT -p tcp --dport "$SSH_PORT" -j ACCEPT 2>/dev/null; then
-    iptables -I INPUT 1 -p tcp --dport "$SSH_PORT" -j ACCEPT
-    echo "SSH-доступ (${SSH_PORT}) разрешён"
-fi
+CHAIN6="MTPR_SYNFIX6"
 
 iptables -t filter -N "$CHAIN" 2>/dev/null || true
 iptables -t filter -F "$CHAIN"
 
 if ! iptables -t filter -C INPUT -j "$CHAIN" 2>/dev/null; then
-    iptables -t filter -I INPUT 2 -j "$CHAIN"
+    iptables -t filter -I INPUT 1 -j "$CHAIN"
     echo "Цепочка $CHAIN подключена к INPUT"
+fi
+
+if command -v ip6tables >/dev/null 2>&1; then
+    ip6tables -t filter -N "$CHAIN6" 2>/dev/null || true
+    ip6tables -t filter -F "$CHAIN6"
+    if ! ip6tables -t filter -C INPUT -j "$CHAIN6" 2>/dev/null; then
+        ip6tables -t filter -I INPUT 1 -j "$CHAIN6"
+    fi
 fi
 
 # ── Проходим по каждому порту ──────────────────────────────
@@ -154,11 +157,19 @@ for PORT in "${PORT_ARRAY[@]}"; do
     PORT=$(echo "$PORT" | xargs)
     [ -z "$PORT" ] && continue
 
-    # ── iOS — проверка TTL+Length, ACCEPT БЕЗ ЛИМИТА ────────
+    # Fingerprint не является доверенным признаком. Для совместимости iOS
+    # получает только ограниченное повышенное окно, а не безлимитный ACCEPT.
     iptables -t filter -A "$CHAIN" -p tcp --dport "$PORT" --syn \
         -m tcp --tcp-flags SYN SYN \
         -m length --length 64 \
         -m ttl --ttl-lt 65 \
+        -m hashlimit \
+        --hashlimit-name mt_ios_"$PORT" \
+        --hashlimit-mode srcip \
+        --hashlimit-upto 300/minute \
+        --hashlimit-burst 10 \
+        --hashlimit-htable-expire 60000 \
+        -m limit --limit 2000/second --limit-burst 2000 \
         -j ACCEPT
 
     # ── ВТОРОЙ СЛОЙ — все остальные → hashlimit 54/мин ──────
@@ -170,11 +181,26 @@ for PORT in "${PORT_ARRAY[@]}"; do
         --hashlimit-burst 1 \
         --hashlimit-htable-expire 60000 \
         --hashlimit-htable-size 32768 \
+        -m limit --limit 1000/second --limit-burst 1000 \
         -j ACCEPT
 
     # ── REJECT для всех остальных ────────────────────────────
     iptables -t filter -A "$CHAIN" -p tcp --dport "$PORT" --syn \
         -j REJECT --reject-with tcp-reset
+
+    if command -v ip6tables >/dev/null 2>&1; then
+        ip6tables -t filter -A "$CHAIN6" -p tcp --dport "$PORT" --syn \
+            -m hashlimit \
+            --hashlimit-name mt6_"$PORT" \
+            --hashlimit-mode srcip \
+            --hashlimit-upto 54/minute \
+            --hashlimit-burst 1 \
+            --hashlimit-htable-expire 60000 \
+            -m limit --limit 1000/second --limit-burst 1000 \
+            -j ACCEPT
+        ip6tables -t filter -A "$CHAIN6" -p tcp --dport "$PORT" --syn \
+            -j REJECT --reject-with tcp-reset
+    fi
 done
 
 APPLY_SCRIPT_EOF
@@ -193,23 +219,23 @@ else
 fi
 
 CHAIN="MTPR_SYNFIX"
-SSH_PORT=$(sshd -T 2>/dev/null | grep '^port ' | awk '{print $2}' || echo 22)
-
-if ! iptables -C INPUT -p tcp --dport "$SSH_PORT" -j ACCEPT 2>/dev/null; then
-    iptables -I INPUT 1 -p tcp --dport "$SSH_PORT" -j ACCEPT
-    echo "SSH-доступ (${SSH_PORT}) разрешён"
-fi
+CHAIN6="MTPR_SYNFIX6"
 
 iptables -t filter -N "$CHAIN" 2>/dev/null || true
 iptables -t filter -F "$CHAIN"
 
 if ! iptables -t filter -C INPUT -j "$CHAIN" 2>/dev/null; then
-    iptables -t filter -I INPUT 2 -j "$CHAIN"
+    iptables -t filter -I INPUT 1 -j "$CHAIN"
     echo "Цепочка $CHAIN подключена к INPUT"
 fi
 
-# ── 1. Маркировка iOS в mangle ──────────────────────────────
-iptables -t mangle -A PREROUTING -m u32 --u32 "32 & 0x000FFFFF = 0x0002FFFF && 40 & 0xFF000000 = 0x02000000 && 44 & 0xFFFF0000 = 0x01030000 && 48 & 0xFFFFFF00 = 0x01010800 && 60 & 0xFFFFFFFF = 0x04020000" -j MARK --set-mark 0x400
+if command -v ip6tables >/dev/null 2>&1; then
+    ip6tables -t filter -N "$CHAIN6" 2>/dev/null || true
+    ip6tables -t filter -F "$CHAIN6"
+    if ! ip6tables -t filter -C INPUT -j "$CHAIN6" 2>/dev/null; then
+        ip6tables -t filter -I INPUT 1 -j "$CHAIN6"
+    fi
+fi
 
 # ── Проходим по каждому порту ──────────────────────────────
 IFS=',' read -ra PORT_ARRAY <<< "$PORTS"
@@ -217,8 +243,23 @@ for PORT in "${PORT_ARRAY[@]}"; do
     PORT=$(echo "$PORT" | xargs)
     [ -z "$PORT" ] && continue
 
-    # ── ACCEPT для маркированных iOS (БЕЗ ЛИМИТА) ─────────────
-    iptables -t filter -A "$CHAIN" -p tcp --dport "$PORT" --syn -m mark --mark 0x400 -j ACCEPT
+    # Маркировка ограничена TCP и конкретным proxy-портом и не дублируется.
+    U32_FILTER="32 & 0x000FFFFF = 0x0002FFFF && 40 & 0xFF000000 = 0x02000000 && 44 & 0xFFFF0000 = 0x01030000 && 48 & 0xFFFFFF00 = 0x01010800 && 60 & 0xFFFFFFFF = 0x04020000"
+    if ! iptables -t mangle -C PREROUTING -p tcp --dport "$PORT" -m u32 --u32 "$U32_FILTER" -j MARK --set-mark 0x400 2>/dev/null; then
+        iptables -t mangle -A PREROUTING -p tcp --dport "$PORT" -m u32 --u32 "$U32_FILTER" -j MARK --set-mark 0x400
+    fi
+
+    # Fingerprint подделываем, поэтому разрешено лишь повышенное, но конечное окно.
+    iptables -t filter -A "$CHAIN" -p tcp --dport "$PORT" --syn \
+        -m mark --mark 0x400 \
+        -m hashlimit \
+        --hashlimit-name mt_ios_"$PORT" \
+        --hashlimit-mode srcip \
+        --hashlimit-upto 300/minute \
+        --hashlimit-burst 10 \
+        --hashlimit-htable-expire 60000 \
+        -m limit --limit 2000/second --limit-burst 2000 \
+        -j ACCEPT
 
     # ── ВТОРОЙ СЛОЙ — все остальные → hashlimit 54/мин ──────
     iptables -t filter -A "$CHAIN" -p tcp --dport "$PORT" --syn \
@@ -229,17 +270,33 @@ for PORT in "${PORT_ARRAY[@]}"; do
         --hashlimit-burst 1 \
         --hashlimit-htable-expire 60000 \
         --hashlimit-htable-size 32768 \
+        -m limit --limit 1000/second --limit-burst 1000 \
         -j ACCEPT
 
     # ── REJECT для всех остальных ────────────────────────────
     iptables -t filter -A "$CHAIN" -p tcp --dport "$PORT" --syn \
         -j REJECT --reject-with tcp-reset
+
+    if command -v ip6tables >/dev/null 2>&1; then
+        ip6tables -t filter -A "$CHAIN6" -p tcp --dport "$PORT" --syn \
+            -m hashlimit \
+            --hashlimit-name mt6_"$PORT" \
+            --hashlimit-mode srcip \
+            --hashlimit-upto 54/minute \
+            --hashlimit-burst 1 \
+            --hashlimit-htable-expire 60000 \
+            -m limit --limit 1000/second --limit-burst 1000 \
+            -j ACCEPT
+        ip6tables -t filter -A "$CHAIN6" -p tcp --dport "$PORT" --syn \
+            -j REJECT --reject-with tcp-reset
+    fi
 done
 
 APPLY_SCRIPT_EOF
     fi
 
-    chmod +x /opt/mtpr-simple/apply-mtpr-synfix.sh
+    chown root:root /opt/mtpr-simple/apply-mtpr-synfix.sh
+    chmod 0755 /opt/mtpr-simple/apply-mtpr-synfix.sh
 }
 
 # ── Генерация systemd юнита ────────────────────────────────────
@@ -422,12 +479,9 @@ install_syn_fix() {
             source /opt/mtpr-simple/data/zapret2_fix.sh
             show_zapret2_menu
         else
-            log_error "zapret2_fix.sh не найден, скачиваю..."
-            mkdir -p /opt/mtpr-simple/data
-            curl -fsSL "https://raw.githubusercontent.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/main/data/zapret2_fix.sh" -o /opt/mtpr-simple/data/zapret2_fix.sh
-            chmod +x /opt/mtpr-simple/data/zapret2_fix.sh
-            source /opt/mtpr-simple/data/zapret2_fix.sh
-            show_zapret2_menu
+            log_error "zapret2_fix.sh не найден. Автозагрузка из main отключена."
+            log_info "Переустановите проект из проверенного локального checkout."
+            return 1
         fi
         return 0
     fi
@@ -523,23 +577,29 @@ nft "add chain inet $TABLE $CHAIN { type filter hook input priority 0; policy ac
 
 NFT_WRAPPER_EOF
 
-        if [ "$FIX_TYPE" = "docker_smart" ]; then
-            cat >> "$NFT_SCRIPT" << 'SMART_RULES_EOF'
-nft "add rule inet mtpr_synfix input tcp dport PORT_HERE tcp flags & (syn|ack) == syn @th,108,20 0x2ffff @th,160,16 0x204 @th,192,16 0x103 @th,224,24 0x10108 @th,320,32 0x4020000 counter accept comment \"ios_accept\""
-nft "add rule inet mtpr_synfix input tcp dport PORT_HERE tcp flags & (syn|ack) == syn meter mtpr_other { ip saddr timeout 60s limit rate 54/minute burst 1 packets } counter accept comment \"other_accept\""
-nft "add rule inet mtpr_synfix input tcp dport PORT_HERE tcp flags & (syn|ack) == syn counter reject with icmp type host-unreachable comment \"other_reject\""
-SMART_RULES_EOF
-        else
-            cat >> "$NFT_SCRIPT" << 'CLASSIC_RULES_EOF'
-nft "add rule inet mtpr_synfix input tcp dport PORT_HERE tcp flags & (syn|ack) == syn meter mtpr_classic { ip saddr timeout 60s limit rate 1/second burst 1 packets } counter drop comment \"classic_drop\""
-CLASSIC_RULES_EOF
-        fi
-
         for port in "${valid_ports[@]}"; do
-            sed -i "s/PORT_HERE/${port}/g" "$NFT_SCRIPT"
+            cat >> "$NFT_SCRIPT" << GLOBAL_CEILING_EOF
+nft "add rule inet mtpr_synfix input meta nfproto ipv4 tcp dport ${port} tcp flags & (syn|ack) == syn limit rate over 3000/second burst 3000 packets counter reject with tcp reset comment \"global_ipv4_over_limit\""
+nft "add rule inet mtpr_synfix input meta nfproto ipv6 tcp dport ${port} tcp flags & (syn|ack) == syn limit rate over 3000/second burst 3000 packets counter reject with tcp reset comment \"global_ipv6_over_limit\""
+GLOBAL_CEILING_EOF
+            if [ "$FIX_TYPE" = "docker_smart" ]; then
+                cat >> "$NFT_SCRIPT" << SMART_RULES_EOF
+nft "add rule inet mtpr_synfix input meta nfproto ipv4 tcp dport ${port} tcp flags & (syn|ack) == syn @th,108,20 0x2ffff @th,160,16 0x204 @th,192,16 0x103 @th,224,24 0x10108 @th,320,32 0x4020000 meter mtpr_ios_${port}_v4 { ip saddr timeout 60s limit rate 300/minute burst 10 packets } counter accept comment \"ios_limited_accept\""
+nft "add rule inet mtpr_synfix input meta nfproto ipv4 tcp dport ${port} tcp flags & (syn|ack) == syn meter mtpr_other_${port}_v4 { ip saddr timeout 60s limit rate 54/minute burst 1 packets } counter accept comment \"other_ipv4_accept\""
+nft "add rule inet mtpr_synfix input meta nfproto ipv4 tcp dport ${port} tcp flags & (syn|ack) == syn counter reject with tcp reset comment \"other_ipv4_reject\""
+nft "add rule inet mtpr_synfix input meta nfproto ipv6 tcp dport ${port} tcp flags & (syn|ack) == syn meter mtpr_other_${port}_v6 { ip6 saddr timeout 60s limit rate 54/minute burst 1 packets } counter accept comment \"ipv6_accept\""
+nft "add rule inet mtpr_synfix input meta nfproto ipv6 tcp dport ${port} tcp flags & (syn|ack) == syn counter reject with tcp reset comment \"ipv6_reject\""
+SMART_RULES_EOF
+            else
+                cat >> "$NFT_SCRIPT" << CLASSIC_RULES_EOF
+nft "add rule inet mtpr_synfix input meta nfproto ipv4 tcp dport ${port} tcp flags & (syn|ack) == syn meter mtpr_classic_${port}_v4 { ip saddr timeout 60s limit rate over 54/minute burst 1 packets } counter reject with tcp reset comment \"classic_ipv4_over_limit\""
+nft "add rule inet mtpr_synfix input meta nfproto ipv6 tcp dport ${port} tcp flags & (syn|ack) == syn meter mtpr_classic_${port}_v6 { ip6 saddr timeout 60s limit rate over 54/minute burst 1 packets } counter reject with tcp reset comment \"classic_ipv6_over_limit\""
+CLASSIC_RULES_EOF
+            fi
         done
 
-        chmod +x "$NFT_SCRIPT"
+        chown root:root "$NFT_SCRIPT"
+        chmod 0755 "$NFT_SCRIPT"
 
         if /bin/sh "$NFT_SCRIPT"; then
             log_success "NFT правила применены успешно"
@@ -780,17 +840,20 @@ nft "add chain inet $TABLE $CHAIN { type filter hook input priority 0; policy ac
 
 NFT_WRAPPER_EOF
 
-    cat >> "$NFT_SCRIPT" << 'SMART_RULES_EOF'
-nft "add rule inet mtpr_synfix input tcp dport PORT_HERE tcp flags & (syn|ack) == syn @th,108,20 0x2ffff @th,160,16 0x204 @th,192,16 0x103 @th,224,24 0x10108 @th,320,32 0x4020000 counter accept comment \"ios_accept\""
-nft "add rule inet mtpr_synfix input tcp dport PORT_HERE tcp flags & (syn|ack) == syn meter mtpr_other { ip saddr timeout 60s limit rate 54/minute burst 1 packets } counter accept comment \"other_accept\""
-nft "add rule inet mtpr_synfix input tcp dport PORT_HERE tcp flags & (syn|ack) == syn counter reject with icmp type host-unreachable comment \"other_reject\""
-SMART_RULES_EOF
-
     for port in "${valid_ports[@]}"; do
-        sed -i "s/PORT_HERE/${port}/g" "$NFT_SCRIPT"
+        cat >> "$NFT_SCRIPT" << SMART_RULES_EOF
+nft "add rule inet mtpr_synfix input meta nfproto ipv4 tcp dport ${port} tcp flags & (syn|ack) == syn limit rate over 3000/second burst 3000 packets counter reject with tcp reset comment \"global_ipv4_over_limit\""
+nft "add rule inet mtpr_synfix input meta nfproto ipv6 tcp dport ${port} tcp flags & (syn|ack) == syn limit rate over 3000/second burst 3000 packets counter reject with tcp reset comment \"global_ipv6_over_limit\""
+nft "add rule inet mtpr_synfix input meta nfproto ipv4 tcp dport ${port} tcp flags & (syn|ack) == syn @th,108,20 0x2ffff @th,160,16 0x204 @th,192,16 0x103 @th,224,24 0x10108 @th,320,32 0x4020000 meter mtpr_ios_${port}_v4 { ip saddr timeout 60s limit rate 300/minute burst 10 packets } counter accept comment \"ios_limited_accept\""
+nft "add rule inet mtpr_synfix input meta nfproto ipv4 tcp dport ${port} tcp flags & (syn|ack) == syn meter mtpr_other_${port}_v4 { ip saddr timeout 60s limit rate 54/minute burst 1 packets } counter accept comment \"other_ipv4_accept\""
+nft "add rule inet mtpr_synfix input meta nfproto ipv4 tcp dport ${port} tcp flags & (syn|ack) == syn counter reject with tcp reset comment \"other_ipv4_reject\""
+nft "add rule inet mtpr_synfix input meta nfproto ipv6 tcp dport ${port} tcp flags & (syn|ack) == syn meter mtpr_other_${port}_v6 { ip6 saddr timeout 60s limit rate 54/minute burst 1 packets } counter accept comment \"ipv6_accept\""
+nft "add rule inet mtpr_synfix input meta nfproto ipv6 tcp dport ${port} tcp flags & (syn|ack) == syn counter reject with tcp reset comment \"ipv6_reject\""
+SMART_RULES_EOF
     done
 
-    chmod +x "$NFT_SCRIPT"
+    chown root:root "$NFT_SCRIPT"
+    chmod 0755 "$NFT_SCRIPT"
 
     if /bin/sh "$NFT_SCRIPT"; then
         log_success "NFT правила применены успешно"
@@ -841,7 +904,39 @@ remove_syn_fix() {
         log_info "Цепочка $SYNFIX_CHAIN удалена"
     fi
 
+    if command -v ip6tables >/dev/null 2>&1; then
+        if ip6tables -C INPUT -j MTPR_SYNFIX6 2>/dev/null; then
+            ip6tables -D INPUT -j MTPR_SYNFIX6 2>/dev/null || true
+        fi
+        if ip6tables -L MTPR_SYNFIX6 -n >/dev/null 2>&1; then
+            ip6tables -F MTPR_SYNFIX6 2>/dev/null || true
+            ip6tables -X MTPR_SYNFIX6 2>/dev/null || true
+        fi
+    fi
+
+    # Старые версии могли добавить неотличимое от пользовательского SSH ACCEPT.
+    # Не удаляем его автоматически: это может оборвать единственный канал доступа.
+    local ssh_port
+    ssh_port=$(sshd -T 2>/dev/null | awk '/^port / { print $2; exit }')
+    ssh_port=${ssh_port:-22}
+    if iptables -C INPUT -p tcp --dport "$ssh_port" -j ACCEPT 2>/dev/null; then
+        log_warning "Обнаружено глобальное SSH ACCEPT на порту $ssh_port. Проверьте его и удалите вручную из резервной SSH-сессии."
+    fi
+
     local u32_filter="32 & 0x000FFFFF = 0x0002FFFF && 40 & 0xFF000000 = 0x02000000 && 44 & 0xFFFF0000 = 0x01030000 && 48 & 0xFFFFFF00 = 0x01010800 && 60 & 0xFFFFFFFF = 0x04020000"
+
+    if [ -f "$PORT_FILE" ]; then
+        local saved_ports port
+        saved_ports=$(cat "$PORT_FILE")
+        IFS=',' read -ra _saved_port_array <<< "$saved_ports"
+        for port in "${_saved_port_array[@]}"; do
+            port=$(echo "$port" | xargs)
+            [[ "$port" =~ ^[0-9]+$ ]] || continue
+            while iptables -t mangle -C PREROUTING -p tcp --dport "$port" -m u32 --u32 "$u32_filter" -j MARK --set-mark 0x400 2>/dev/null; do
+                iptables -t mangle -D PREROUTING -p tcp --dport "$port" -m u32 --u32 "$u32_filter" -j MARK --set-mark 0x400 2>/dev/null || break
+            done
+        done
+    fi
     
     if iptables -t mangle -L PREROUTING -n 2>/dev/null | grep -q "$u32_filter"; then
         log_info "Обнаружены правила u32 в mangle (iptables), удаляем..."
@@ -875,6 +970,7 @@ remove_syn_fix() {
 
     rm -f "$PORT_FILE"
     rm -f /etc/systemd/system/mtpr-synfix.service
+    rm -f /opt/mtpr-simple/apply-mtpr-synfix.sh
 
     systemctl stop mtpr-nft-synfix.service 2>/dev/null || true
     systemctl disable mtpr-nft-synfix.service 2>/dev/null || true

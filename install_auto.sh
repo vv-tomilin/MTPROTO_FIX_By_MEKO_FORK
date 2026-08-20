@@ -3,8 +3,17 @@
 
 set -e
 
-BASE_URL="https://raw.githubusercontent.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/main"
 INSTALL_DIR="/opt/mtpr-simple"
+PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+
+if [ ! -r "$PROJECT_ROOT/data/dependencies.env" ] || [ ! -r "$PROJECT_ROOT/data/secure_fetch.sh" ]; then
+    echo "Запускайте install_auto.sh из полного локального checkout или из /opt/mtpr-simple" >&2
+    exit 1
+fi
+# shellcheck disable=SC1091
+source "$PROJECT_ROOT/data/dependencies.env"
+# shellcheck disable=SC1091
+source "$PROJECT_ROOT/data/secure_fetch.sh"
 
 # ── Цвета ─────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -44,16 +53,12 @@ read_input() {
 download_file() {
     local file="$1"
     local dest="$2"
-    local url="$BASE_URL/$file"
+    local source_file="$PROJECT_ROOT/$file"
     
-    mkdir -p "$(dirname "$dest")"
-    
-    if curl -fsSL "$url" -o "$dest" 2>/dev/null; then
-        chmod +x "$dest" 2>/dev/null || true
-        return 0
-    else
+    if [ ! -f "$source_file" ] || [ -L "$source_file" ]; then
         return 1
     fi
+    install -D -o root -g root -m 0755 -- "$source_file" "$dest"
 }
 
 # ── 1. ПРОВЕРКА И УСТАНОВКА RULES.SH ──────────────────────────
@@ -115,20 +120,7 @@ get_public_ip() {
 
 # ── Функция получения последней версии Telemt из релизов ─────
 get_latest_telemt_version() {
-    local version=""
-    # Пробуем получить через GitHub API с помощью awk (надёжный парсер)
-    version=$(curl -fsS --max-time 5 "https://api.github.com/repos/telemt/telemt/releases/latest" 2>/dev/null | awk -F'"' '/"tag_name"/ {print $4}')
-    # Если не получилось — пробуем через список релизов
-    if [ -z "$version" ]; then
-        version=$(curl -fsS --max-time 5 "https://api.github.com/repos/telemt/telemt/releases" 2>/dev/null | awk -F'"' '/"tag_name"/ {print $4; exit}')
-    fi
-    # Если всё равно пусто — используем fallback (3.4.23)
-    if [ -z "$version" ]; then
-        version="3.4.23"
-        # Предупреждение выводим отдельной строкой в stderr
-        log_warning "Не удалось определить последнюю версию Telemt, используем $version" >&2
-    fi
-    echo "$version"
+    echo "$TELEMT_LOCKED_VERSION"
 }
 
 # ── Режим автоустановки (БЕЗ ЗАПРОСОВ) ─────────────────────
@@ -170,8 +162,9 @@ auto_install_mode() {
     echo ""
     
     # 1. Установка Telemt (конкретная версия, русский язык)
+    require_unverified_installer_opt_in "Telemt standard" || return 1
     log_info "Установка Telemt версии ${telemt_version} на домен $domain, порт $port..."
-    if curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh -s -- "$telemt_version" -l 2 -d "$domain" -p "$port"; then
+    if secure_run_github_script sh telemt/telemt "$TELEMT_REF" install.sh "$telemt_version" -l 2 -d "$domain" -p "$port"; then
         log_success "Telemt ${telemt_version} установлен успешно"
     else
         log_error "Ошибка установки Telemt ${telemt_version}"
@@ -224,7 +217,7 @@ auto_install_mode() {
             1)
                 echo ""
                 log_info "Установка MEKO Launcher..."
-                curl -fsSL "$BASE_URL/install_main.sh" | sudo bash
+                "$PROJECT_ROOT/install_main.sh"
                 break
                 ;;
             *)
@@ -351,7 +344,7 @@ semi_auto_install_mode() {
             1)
                 echo ""
                 log_info "Установка MEKO Launcher..."
-                curl -fsSL "$BASE_URL/install_main.sh" | sudo bash
+                "$PROJECT_ROOT/install_main.sh"
                 break
                 ;;
             *)

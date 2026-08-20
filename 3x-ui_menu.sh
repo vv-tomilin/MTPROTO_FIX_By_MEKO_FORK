@@ -1,4 +1,14 @@
 #!/bin/bash
+
+MEKOPR_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+if [ ! -r "$MEKOPR_ROOT/data/dependencies.env" ] || [ ! -r "$MEKOPR_ROOT/data/secure_fetch.sh" ]; then
+    echo "Не найдены зафиксированные зависимости MEKOpr" >&2
+    return 1 2>/dev/null || exit 1
+fi
+# shellcheck disable=SC1091
+source "$MEKOPR_ROOT/data/dependencies.env"
+# shellcheck disable=SC1091
+source "$MEKOPR_ROOT/data/secure_fetch.sh"
 # 3x-ui_menu.sh – Меню управления панелью 3x-ui
 
 set -e
@@ -56,7 +66,8 @@ install_3xui() {
 
     log_info "Запуск установки 3x-ui (это может занять несколько минут)..."
     echo ""
-    if sudo su -c "bash <(wget -qO- https://raw.githubusercontent.com/mozaroc/3x-ui-pro/main/x-ui-latest.sh) -install yes -auto_domain y"; then
+    require_unverified_installer_opt_in "3x-ui" || return 1
+    if secure_run_github_script bash mozaroc/3x-ui-pro "$XUI_REF" x-ui-latest.sh -install yes -auto_domain y; then
         log_success "3x-ui установлен"
     else
         log_error "Ошибка установки 3x-ui"
@@ -78,7 +89,8 @@ install_3xui() {
         wait_seconds=$((wait_seconds + 5))
     done
 
-    if bash <(curl -fsSL https://raw.githubusercontent.com/mozaroc/3x-ui-pro/main/x-ui-patch.sh); then
+    require_unverified_installer_opt_in "3x-ui patch" || return 1
+    if secure_run_github_script bash mozaroc/3x-ui-pro "$XUI_REF" x-ui-patch.sh; then
         log_success "Патч применён"
     else
         log_warning "Патч не применился (возможно, он не требуется или apt всё ещё занят)"

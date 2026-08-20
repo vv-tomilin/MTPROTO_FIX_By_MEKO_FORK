@@ -1,4 +1,14 @@
 #!/bin/bash
+
+MEKOPR_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+if [ ! -r "$MEKOPR_ROOT/data/dependencies.env" ] || [ ! -r "$MEKOPR_ROOT/data/secure_fetch.sh" ]; then
+    echo "Не найдены зафиксированные зависимости MEKOpr" >&2
+    return 1 2>/dev/null || exit 1
+fi
+# shellcheck disable=SC1091
+source "$MEKOPR_ROOT/data/dependencies.env"
+# shellcheck disable=SC1091
+source "$MEKOPR_ROOT/data/secure_fetch.sh"
 # telemt_panel_amirotin.sh — управление панелью Telemt Panel (amirotin)
 
 # ── Цвета ─────────────────────────────────────────────────────
@@ -109,6 +119,40 @@ get_panel_port() {
         grep -E '^listen[[:space:]]*=' "$config_path" 2>/dev/null | head -1 | sed -E 's/^[[:space:]]*listen[[:space:]]*=[[:space:]]*"//; s/".*$//' | awk -F: '{print $2}'
     else
         echo ""
+    fi
+}
+
+harden_panel_access() {
+    local config_path="/etc/telemt-panel/config.toml"
+    local panel_port
+    panel_port=$(get_panel_port)
+    panel_port=${panel_port:-8080}
+    if [[ ! "$panel_port" =~ ^[0-9]+$ ]] || [ "$panel_port" -lt 1 ] || [ "$panel_port" -gt 65535 ]; then
+        echo -e "  ${RED}[✗]${NC} Некорректный порт панели" >&2
+        return 1
+    fi
+    if [ ! -f "$config_path" ]; then
+        echo -e "  ${RED}[✗]${NC} Конфиг панели не найден: $config_path" >&2
+        return 1
+    fi
+
+    if [ ! -f "${config_path}.pre-mekopr" ]; then
+        install -o root -g root -m 0600 "$config_path" "${config_path}.pre-mekopr"
+    fi
+    if grep -qE '^[[:space:]]*listen[[:space:]]*=' "$config_path"; then
+        sed -i -E "s|^[[:space:]]*listen[[:space:]]*=.*|listen = \"127.0.0.1:${panel_port}\"|" "$config_path"
+    else
+        printf '\nlisten = "127.0.0.1:%s"\n' "$panel_port" >> "$config_path"
+    fi
+    chown root:root "$config_path"
+    chmod 0600 "$config_path"
+    if ! systemctl restart telemt-panel 2>/dev/null; then
+        echo -e "  ${RED}[✗]${NC} Панель не запустилась после ограничения listen" >&2
+        return 1
+    fi
+    if ! systemctl is-active --quiet telemt-panel; then
+        echo -e "  ${RED}[✗]${NC} Служба панели неактивна" >&2
+        return 1
     fi
 }
 
@@ -269,16 +313,22 @@ install_panel() {
     echo ""
     
     # Запускаем установку через официальный скрипт
-    if curl -fsSL https://raw.githubusercontent.com/amirotin/telemt_panel/main/install.sh | bash; then
+    require_unverified_installer_opt_in "Telemt Panel" || return 1
+    if secure_run_github_script bash amirotin/telemt_panel "$TELEMT_PANEL_REF" install.sh; then
+        if ! harden_panel_access; then
+            echo -e "  ${RED}[✗]${NC} Не удалось ограничить панель loopback; служба остановлена"
+            systemctl stop telemt-panel 2>/dev/null || true
+            return 1
+        fi
         echo ""
         echo -e "  ${GREEN}${BOLD}[✓]${NC} Панель Telemt Panel успешно установлена!"
         
         local panel_port=$(get_panel_port)
-        local server_ip=$(get_public_ip)
-        if [ -n "$panel_port" ] && [ -n "$server_ip" ]; then
+        if [ -n "$panel_port" ]; then
             echo ""
-            echo -e "  ${BOLD}Панель доступна по адресу:${NC}"
-            echo -e "  ${CYAN}http://${server_ip}:${panel_port}${NC}"
+            echo -e "  ${BOLD}Панель доступна только на сервере:${NC}"
+            echo -e "  ${CYAN}http://127.0.0.1:${panel_port}${NC}"
+            echo -e "  ${DIM}Используйте SSH tunnel или HTTPS reverse proxy.${NC}"
         fi
     else
         echo ""
@@ -316,7 +366,7 @@ uninstall_panel() {
         1)
             echo ""
             echo -e "  ${BLUE}[i]${NC} Выполнение uninstall..."
-            if curl -fsSL https://raw.githubusercontent.com/amirotin/telemt_panel/main/install.sh | bash -s uninstall; then
+            if secure_run_github_script bash amirotin/telemt_panel "$TELEMT_PANEL_REF" install.sh uninstall; then
                 echo ""
                 echo -e "  ${GREEN}${BOLD}[✓]${NC} Панель удалена (конфиг и данные сохранены)"
             else
@@ -338,7 +388,7 @@ uninstall_panel() {
             fi
             echo ""
             echo -e "  ${BLUE}[i]${NC} Выполнение purge..."
-            if curl -fsSL https://raw.githubusercontent.com/amirotin/telemt_panel/main/install.sh | bash -s purge; then
+            if secure_run_github_script bash amirotin/telemt_panel "$TELEMT_PANEL_REF" install.sh purge; then
                 echo ""
                 echo -e "  ${GREEN}${BOLD}[✓]${NC} Панель полностью удалена"
             else
@@ -457,7 +507,13 @@ update_panel() {
     echo -e "  ${BLUE}[i]${NC} Запуск обновления через установочный скрипт..."
     echo ""
     
-    if curl -fsSL https://raw.githubusercontent.com/amirotin/telemt_panel/main/install.sh | bash; then
+    require_unverified_installer_opt_in "Telemt Panel update" || return 1
+    if secure_run_github_script bash amirotin/telemt_panel "$TELEMT_PANEL_REF" install.sh; then
+        if ! harden_panel_access; then
+            echo -e "  ${RED}[✗]${NC} Не удалось восстановить loopback-привязку; служба остановлена"
+            systemctl stop telemt-panel 2>/dev/null || true
+            return 1
+        fi
         echo ""
         local new_version=$(get_panel_version)
         echo -e "  ${GREEN}${BOLD}[✓]${NC} Панель обновлена!"
@@ -504,11 +560,10 @@ show_panel_info() {
             echo -e "  ${BOLD}Конфиг:${NC} ${CYAN}${config_path}${NC}"
         fi
         
-        local server_ip=$(get_public_ip)
-        if [ -n "$port" ] && [ -n "$server_ip" ]; then
+        if [ -n "$port" ]; then
             echo ""
-            echo -e "  ${BOLD}Панель доступна по адресу:${NC}"
-            echo -e "  ${CYAN}http://${server_ip}:${port}${NC}"
+            echo -e "  ${BOLD}Панель доступна только локально:${NC}"
+            echo -e "  ${CYAN}http://127.0.0.1:${port}${NC}"
         fi
     else
         echo -e "  ${BOLD}Панель:${NC} ${RED}не установлена${NC}"
@@ -531,10 +586,9 @@ while true; do
         echo ""
         # Сначала выводим URL панели (если есть)
         panel_port=$(get_panel_port)
-        server_ip=$(get_public_ip)
-        if [ -n "$panel_port" ] && [ -n "$server_ip" ]; then
-            echo -e "  ${BOLD}Панель доступна по адресу:${NC}"
-            echo -e "  ${CYAN}http://${server_ip}:${panel_port}${NC}"
+        if [ -n "$panel_port" ]; then
+            echo -e "  ${BOLD}Панель доступна только локально:${NC}"
+            echo -e "  ${CYAN}http://127.0.0.1:${panel_port}${NC}"
             echo ""
         fi
         echo -e "  ${NC}${BOLD}Панель:${NC}${GREEN}${BOLD} установлена${NC}"

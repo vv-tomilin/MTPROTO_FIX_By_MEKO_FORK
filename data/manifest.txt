@@ -4,6 +4,14 @@ install_main.sh|Полуавтоматический установщик
 
 install.sh|Главный файл установки 
 
+LICENSE|Лицензия оригинального проекта
+
+NOTICE.md|Атрибуция и описание изменений неофициального форка
+
+3x-ui_menu.sh|Меню 3x-ui
+
+install_vpn.sh|Меню VPN
+
 main.sh|Главное меню лаунчера
 
 proxys/proxymenu.sh|Меню выбора прокси
@@ -12,14 +20,32 @@ data/rules.sh|Основной набор правил
 
 data/zapret2_fix.sh|Меню и настройки zapret2
 
+data/dependencies.env|Зафиксированные версии внешних зависимостей
+
+data/secure_fetch.sh|Безопасная загрузка скриптов по commit SHA
+
 proxys/telemt1.sh|Меню Telemt
 
 proxys/telemt_panel_amirotin.sh|Меню упр панелью для Telemt от amirotin
 
 proxys/mtgv2_1.sh|Меню MTG
 
+proxys/mtgv1_1.sh|Меню MTG v1
+
 proxys/mtprotozig1.sh|Меню MTProtoZig
 
 proxys/telemt_in_docker1.sh|Установка Telemt в Docker
 
+proxys/python_mtproto1.sh|Python MTProto proxy
+
+proxys/teleproxy1.sh|Меню TeleProxy
+
 proxy_checker.py|Проверка SNI
+
+remote_ctl/manifest.txt|Манифест удалённого управления
+
+remote_ctl/node_manager.sh|Менеджер удалённых нод
+
+remote_ctl/rules1_node.sh|Firewall удалённых нод
+
+remote_ctl/telemt1_node.sh|Telemt удалённых нод

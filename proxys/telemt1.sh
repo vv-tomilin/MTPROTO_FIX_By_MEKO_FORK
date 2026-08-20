@@ -1,4 +1,14 @@
 #!/bin/bash
+
+MEKOPR_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+if [ ! -r "$MEKOPR_ROOT/data/dependencies.env" ] || [ ! -r "$MEKOPR_ROOT/data/secure_fetch.sh" ]; then
+    echo "Не найдены зафиксированные зависимости MEKOpr" >&2
+    return 1 2>/dev/null || exit 1
+fi
+# shellcheck disable=SC1091
+source "$MEKOPR_ROOT/data/dependencies.env"
+# shellcheck disable=SC1091
+source "$MEKOPR_ROOT/data/secure_fetch.sh"
 # telemt1.sh
 
 # ── Цвета ─────────────────────────────────────────────────────
@@ -552,16 +562,16 @@ install_telemt() {
         return 0
     fi
 
-    local install_version="latest"
-    local display_version="последнюю"
+    local install_version="$TELEMT_LOCKED_VERSION"
+    local display_version="$TELEMT_LOCKED_VERSION"
     
     if [ -n "$version_input" ]; then
-        if [[ "$version_input" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        if [ "$version_input" = "$TELEMT_LOCKED_VERSION" ]; then
             install_version="$version_input"
             display_version="$version_input"
         else
             echo ""
-            echo -e "  ${YELLOW}[!]${NC} Некорректный формат версии. Используйте формат X.Y.Z"
+            echo -e "  ${YELLOW}[!]${NC} Разрешена только проверенная версия $TELEMT_LOCKED_VERSION"
             echo -e "  ${GRAY}Нажмите любую клавишу для возврата в меню...${NC}"
             read -rsn1
             return 1
@@ -576,22 +586,13 @@ install_telemt() {
     cd /tmp
     unset INSTALL_DIR
 
-    if [ "$install_version" = "latest" ]; then
-        if curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh; then
-            echo ""
-            echo -e "  ${GREEN}[✓]${NC} Telemt успешно установлен (последняя версия)"
-        else
-            echo ""
-            echo -e "  ${RED}[✗]${NC} Ошибка установки Telemt"
-        fi
+    require_unverified_installer_opt_in "Telemt standard" || return 1
+    if secure_run_github_script sh telemt/telemt "$TELEMT_REF" install.sh "$install_version"; then
+        echo ""
+        echo -e "  ${GREEN}[✓]${NC} Telemt версии ${install_version} успешно установлен"
     else
-        if curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh -s -- "$install_version"; then
-            echo ""
-            echo -e "  ${GREEN}[✓]${NC} Telemt версии ${install_version} успешно установлен"
-        else
-            echo ""
-            echo -e "  ${RED}[✗]${NC} Ошибка установки Telemt версии ${install_version}"
-        fi
+        echo ""
+        echo -e "  ${RED}[✗]${NC} Ошибка установки Telemt версии ${install_version}"
     fi
     
     echo ""
@@ -641,7 +642,7 @@ purge_telemt() {
     echo ""
     echo -e "  ${BLUE}[i]${NC} Удаление Telemt..."
     echo ""
-    if curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh -s -- purge; then
+    if secure_run_github_script sh telemt/telemt "$TELEMT_REF" install.sh purge; then
         echo ""
         echo -e "  ${GREEN}[✓]${NC} Telemt успешно удалён"
     else

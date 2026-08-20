@@ -1,6 +1,14 @@
 #!/bin/bash
 # telemt_in_docker1.sh - Установка Telemt в Docker
 
+MEKOPR_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+if [ ! -r "$MEKOPR_ROOT/data/dependencies.env" ]; then
+    echo "Не найден lock-файл зависимостей MEKOpr" >&2
+    return 1 2>/dev/null || exit 1
+fi
+# shellcheck disable=SC1091
+source "$MEKOPR_ROOT/data/dependencies.env"
+
 # ── Цвета ─────────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -24,31 +32,18 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-# ── Получаем последнюю версию Telemt ────────────────────────
-log_info "Получение последней версии Telemt..."
-TELEMT_VERSION=$(curl -s https://api.github.com/repos/telemt/telemt/releases/latest | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/^v//')
-
-if [ -z "$TELEMT_VERSION" ]; then
-    log_warning "Не удалось получить версию, используем 3.4.22"
-    TELEMT_VERSION="3.4.22"
-else
-    log_success "Последняя версия: $TELEMT_VERSION"
+# Образ закреплён по OCI digest: обновление выполняется только после аудита
+# новой версии и явной замены digest в репозитории.
+TELEMT_VERSION="$TELEMT_LOCKED_VERSION"
+if [[ ! "$TELEMT_IMAGE" =~ ^ghcr\.io/telemt/telemt@sha256:[0-9a-f]{64}$ ]]; then
+    log_error "Образ Telemt не закреплён корректным OCI digest"
+    return 1 2>/dev/null || exit 1
 fi
 
 # ── Проверка Docker ──────────────────────────────────────────
 if ! command -v docker &>/dev/null; then
-    log_warning "Docker не установлен"
-    echo -en "  ${BOLD}Установить Docker? Y/n:${NC} "
-    read -r install_docker
-    if [[ -z "$install_docker" || "$install_docker" =~ ^[yY]$ ]]; then
-        log_info "Установка Docker..."
-        curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh
-    else
-        log_info "Установка отменена"
-        echo -e "  ${GRAY}Нажмите любую клавишу для возврата...${NC}"
-        read -rsn1
-        return 0
-    fi
+    log_error "Docker не установлен. Установите Docker Engine из официального репозитория ОС и повторите запуск."
+    return 1 2>/dev/null || exit 1
 fi
 
 # ── Заголовок ─────────────────────────────────────────────────
@@ -66,7 +61,7 @@ if [[ -n "$confirm" && "$confirm" =~ ^[nN]$ ]]; then
     log_info "Установка отменена"
     echo -e "  ${GRAY}Нажмите любую клавишу для возврата...${NC}"
     read -rsn1
-    return 0
+    return 0 2>/dev/null || exit 0
 fi
 
 # ── 1) Автозапуск Docker ─────────────────────────────────────
@@ -91,6 +86,36 @@ echo -en "  ${BOLD}Введите путь или нажмите Enter для в
 read -r install_path
 if [ -z "$install_path" ]; then
     install_path="/root/telemt"
+fi
+if [[ "$install_path" == *$'\n'* ]] || [[ "$install_path" == *'/../'* ]] || [[ "$install_path" == *'/..' ]]; then
+    log_error "Путь установки содержит небезопасные компоненты"
+    return 1 2>/dev/null || exit 1
+fi
+case "$install_path" in
+    /root/*|/opt/*) ;;
+    *)
+        log_error "Путь установки должен быть отдельным каталогом внутри /root или /opt"
+        return 1 2>/dev/null || exit 1
+        ;;
+esac
+resolved_install_path=$(realpath -m -- "$install_path") || {
+    log_error "Не удалось разрешить путь установки"
+    return 1 2>/dev/null || exit 1
+}
+case "$resolved_install_path" in
+    /root/*|/opt/*) install_path="$resolved_install_path" ;;
+    *)
+        log_error "Разрешённый путь выходит за пределы /root или /opt"
+        return 1 2>/dev/null || exit 1
+        ;;
+esac
+if [ -L "$install_path" ]; then
+    log_error "Путь установки не должен быть символической ссылкой"
+    return 1 2>/dev/null || exit 1
+fi
+if [ -e "$install_path/config.toml" ] || [ -e "$install_path/docker-compose.yml" ]; then
+    log_error "В каталоге уже есть конфигурация. Сначала сделайте резервную копию и удалите старую установку."
+    return 1 2>/dev/null || exit 1
 fi
 log_info "Путь: $install_path"
 
@@ -138,9 +163,12 @@ while true; do
         echo ""
         # Показываем меню снова с новым секретом
         continue
-    elif [[ -n "$secret_input" ]] && [[ ! "$secret_input" =~ ^[yY]$ ]] && [[ -z "$secret_input" ]]; then
-        # Ввели что-то кроме gen, enter, y, Y
-        SECRET="$secret_input"
+    elif [[ -n "$secret_input" ]] && [[ ! "$secret_input" =~ ^[yY]$ ]]; then
+        if [[ ! "$secret_input" =~ ^[0-9a-fA-F]{32}$ ]]; then
+            log_warning "Секрет должен содержать ровно 32 шестнадцатеричных символа"
+            continue
+        fi
+        SECRET="${secret_input,,}"
         echo ""
         echo -e "  ${GREEN}✓${NC} Использован секрет: ${CYAN}${SECRET}${NC}"
         echo ""
@@ -162,13 +190,20 @@ echo -en "  ${BOLD}Введите домен или нажмите Enter для 
 read -r tls_domain_input
 if [ -z "$tls_domain_input" ]; then
     tls_domain="rutube.ru"
+elif [[ "$tls_domain_input" =~ ^[A-Za-z0-9.-]+$ ]] && [[ "$tls_domain_input" != .* ]] && [[ "$tls_domain_input" != *. ]]; then
+    tls_domain="${tls_domain_input,,}"
 else
-    tls_domain="$tls_domain_input"
+    log_error "Некорректное доменное имя"
+    return 1 2>/dev/null || exit 1
 fi
 echo -e "  ${GREEN}✓${NC} Использован домен: ${CYAN}${tls_domain}${NC}"
 
 # ── 6) Определяем IP ─────────────────────────────────────────
-SERVER_IP=$(curl -4 -fsS ifconfig.me 2>/dev/null || curl -4 -fsS icanhazip.com 2>/dev/null || echo "127.0.0.1")
+SERVER_IP=$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)
+if [[ ! "$SERVER_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    log_error "Не удалось безопасно определить публичный IPv4-адрес"
+    return 1 2>/dev/null || exit 1
+fi
 echo ""
 log_info "Обнаружен IP: $SERVER_IP"
 
@@ -177,9 +212,15 @@ echo ""
 log_info "Начинаем установку Telemt ${TELEMT_VERSION} в Docker..."
 echo ""
 
-# Создаем папку
-mkdir -p "$install_path" && cd "$install_path"
+# Создаем папку с закрытыми правами
+umask 077
+install -d -m 0700 -- "$install_path"
+cd "$install_path" || { return 1 2>/dev/null || exit 1; }
 log_success "Папка создана: $install_path"
+
+# Полное значение заголовка Authorization. Оно хранится только в root-only
+# config.toml и не выводится в терминал.
+API_AUTH="Bearer $(openssl rand -hex 32)"
 
 # Создаем config.toml
 cat > config.toml <<EOF
@@ -203,7 +244,10 @@ port = $port
 [server.api]
 enabled = true
 listen = "0.0.0.0:9091"
-whitelist = ["0.0.0.0/0"]
+whitelist = ["127.0.0.0/8", "172.16.0.0/12"]
+auth_header = "$API_AUTH"
+read_only = true
+request_body_limit_bytes = 16384
 
 [censorship]
 tls_domain = "$tls_domain"
@@ -214,18 +258,19 @@ tls_front_dir = "tlsfront"
 [access.users]
 myuser = "$SECRET"
 EOF
+chmod 0600 config.toml
 log_success "config.toml создан"
 
 # Создаем docker-compose.yml
 cat > docker-compose.yml <<EOF
 services:
   telemt:
-    image: ghcr.io/telemt/telemt:${TELEMT_VERSION}
+    image: ${TELEMT_IMAGE}
     container_name: telemt
     restart: unless-stopped
     ports:
       - "${port}:${port}"
-      - "9091:9091"
+      - "127.0.0.1:9091:9091"
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./tlsfront:/app/tlsfront:rw
@@ -235,37 +280,32 @@ services:
       - NET_BIND_SERVICE
     cap_drop:
       - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
     ulimits:
       nofile:
         soft: 65536
         hard: 65536
     security_opt:
       - no-new-privileges:true
-
-  watchtower:
-    image: containrrr/watchtower
-    container_name: watchtower
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      - WATCHTOWER_CLEANUP=true
-      - WATCHTOWER_POLL_INTERVAL=3600
-    command: --include telemt
+    pids_limit: 256
 EOF
+chmod 0600 docker-compose.yml
 log_success "docker-compose.yml создан"
 
-# Устанавливаем jq
-apt install -y jq >/dev/null 2>&1 || true
+# jq нужен только для удобного вывода ссылки после запуска.
+if ! command -v jq >/dev/null 2>&1; then
+    log_warning "jq не установлен; ссылка будет доступна в конфиге/API"
+fi
 
 # Запускаем
 log_info "Запуск Docker контейнера..."
-docker compose up -d
-
-if [ $? -eq 0 ]; then
+if docker compose up -d; then
     log_success "Telemt успешно запущен"
 else
     log_error "Ошибка запуска Telemt"
+    return 1 2>/dev/null || exit 1
 fi
 
 # ── 8) Вывод ссылки ──────────────────────────────────────────
@@ -280,13 +320,16 @@ echo ""
 sleep 1
 
 # Пробуем получить ссылку
-LINK=$(curl -s http://localhost:9091/v1/users 2>/dev/null | jq -r '.data[].links.tls[]' 2>/dev/null | grep -v "::" | grep -v "0.0.0.0" | head -1)
+LINK=""
+if command -v jq >/dev/null 2>&1; then
+    LINK=$(curl -fsS --max-time 5 -H "Authorization: $API_AUTH" http://127.0.0.1:9091/v1/users 2>/dev/null | jq -r '.data[].links.tls[]' 2>/dev/null | grep -v "::" | grep -v "0.0.0.0" | head -1)
+fi
 if [ -n "$LINK" ]; then
     echo -e "  ${CYAN}${LINK}${NC}"
 else
     echo -e "  ${YELLOW}Ссылка пока не доступна. Попробуйте позже:${NC}"
     echo -e "  ${DIM}  docker compose logs -f${NC}"
-    echo -e "  ${DIM}  Или проверьте вручную: curl http://localhost:9091/v1/users${NC}"
+    echo -e "  ${DIM}  Проверьте состояние: docker compose logs --tail=100 telemt${NC}"
 fi
 
 echo ""
@@ -296,6 +339,7 @@ echo -e "  ${BOLD}Секрет:${NC} ${CYAN}${SECRET}${NC}"
 echo -e "  ${BOLD}IP сервера:${NC} ${CYAN}${SERVER_IP}${NC}"
 echo -e "  ${BOLD}Порт:${NC} ${CYAN}${port}${NC}"
 echo -e "  ${BOLD}TLS домен:${NC} ${CYAN}${tls_domain}${NC}"
+echo -e "  ${BOLD}API:${NC} ${GREEN}только 127.0.0.1, read-only, с Authorization${NC}"
 echo ""
 echo -e "  ${BOLD}Команды управления:${NC}"
 echo -e "  ${DIM}  docker compose logs -f  # просмотр логов${NC}"
@@ -307,4 +351,4 @@ echo ""
 
 echo -e "  ${GRAY}Нажмите любую клавишу для возврата в меню...${NC}"
 read -rsn1
-return 0
+return 0 2>/dev/null || exit 0

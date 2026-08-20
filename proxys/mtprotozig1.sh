@@ -1,4 +1,14 @@
 #!/bin/bash
+
+MEKOPR_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+if [ ! -r "$MEKOPR_ROOT/data/dependencies.env" ] || [ ! -r "$MEKOPR_ROOT/data/secure_fetch.sh" ]; then
+    echo "Не найдены зафиксированные зависимости MEKOpr" >&2
+    return 1 2>/dev/null || exit 1
+fi
+# shellcheck disable=SC1091
+source "$MEKOPR_ROOT/data/dependencies.env"
+# shellcheck disable=SC1091
+source "$MEKOPR_ROOT/data/secure_fetch.sh"
 # mtprotozig1.sh
 
 # ── Цвета ─────────────────────────────────────────────────────
@@ -71,7 +81,8 @@ install_zig_cli() {
     echo ""
     echo -e "  ${BLUE}[i]${NC} Установка Zig CLI для MTProtoZig..."
     echo ""
-    if curl -fsSL https://raw.githubusercontent.com/sleep3r/mtproto.zig/main/deploy/bootstrap.sh | sudo bash; then
+    require_unverified_installer_opt_in "mtproto.zig" || return 1
+    if secure_run_github_script bash sleep3r/mtproto.zig "$MTPROTO_ZIG_REF" deploy/bootstrap.sh; then
         echo ""
         echo -e "  ${GREEN}[✓]${NC} Zig CLI успешно установлен"
     else
@@ -99,10 +110,9 @@ install_proxy() {
     echo -e "  • MiddleProxy: ${GREEN}включён${NC}"
     echo -e "  • MSS: ${GREEN}отключён${NC}"
     echo ""
-    echo -e "  ${DIM}Если хотите установить с кастомными параметрами, просто введите команду с ними${NC}"
-    echo -e "  ${DIM}Например: sudo mtbuddy install --port 8443 --domain example.com --middle-proxy --no-tcpmss --yes${NC}"
+    echo -e "  ${DIM}Для кастомных параметров завершите меню и запустите mtbuddy вручную.${NC}"
     echo ""
-    echo -en "  ${BOLD}Ввод ${DIM} (Enter/y - установить с параметрами по умолчанию, n - назад, или введите свою команду)${NC}${BOLD}:${NC} "
+    echo -en "  ${BOLD}Ввод ${DIM} (Enter/y - установить с параметрами по умолчанию, n - назад)${NC}${BOLD}:${NC} "
     read -r choice
 
     case "$choice" in
@@ -125,17 +135,8 @@ install_proxy() {
             return 0
             ;;
         *)
-            # Пользователь ввёл свою команду, выполняем её
             echo ""
-            echo -e "  ${BLUE}[i]${NC} Выполнение: $choice"
-            echo ""
-            if eval "$choice"; then
-                echo ""
-                echo -e "  ${GREEN}[✓]${NC} Команда выполнена успешно"
-            else
-                echo ""
-                echo -e "  ${RED}[✗]${NC} Ошибка выполнения команды"
-            fi
+            echo -e "  ${RED}[✗]${NC} Произвольные команды из root-меню отключены"
             ;;
     esac
     echo ""

@@ -63,10 +63,8 @@ def _find_openssl():
     3.5 в /usr штатно нельзя (сломается apt/ssh/systemd). Поэтому его собирают
     в отдельный префикс — ищем там в первую очередь.
     """
+    # Не доверяем пути из окружения: checker обычно запускается от root.
     candidates = []
-    env_bin = os.environ.get(_OPENSSL_ENV)
-    if env_bin:
-        candidates.append(env_bin)
     for cand in _OPENSSL_CANDIDATES:
         candidates.append(shutil.which("openssl") if cand is None else cand)
 
@@ -192,6 +190,7 @@ def normalize(raw):
 def run_openssl(args):
     _throttle()
     env = os.environ.copy()
+    args = _add_tls_verification(args)
     try:
         proc = subprocess.run(
             [OPENSSL_BIN] + args,
@@ -200,7 +199,11 @@ def run_openssl(args):
             timeout=TIMEOUT,
             env=env,
         )
-        return (proc.stdout + proc.stderr).decode(errors='replace')
+        output = (proc.stdout + proc.stderr).decode(errors='replace')
+        if proc.returncode != 0:
+            output = output.replace("CONNECTION ESTABLISHED", "CONNECTION FAILED")
+            return f"OPENSSL_EXIT_CODE={proc.returncode}\n{output}"
+        return output
     except subprocess.TimeoutExpired:
         return "TIMEOUT"
     except Exception as e:
@@ -209,6 +212,7 @@ def run_openssl(args):
 def run_openssl_full(args):
     _throttle()
     env = os.environ.copy()
+    args = _add_tls_verification(args)
     try:
         proc = subprocess.run(
             [OPENSSL_BIN] + args,
@@ -217,11 +221,31 @@ def run_openssl_full(args):
             timeout=TIMEOUT,
             env=env,
         )
-        return (proc.stdout + proc.stderr).decode(errors='replace')
+        output = (proc.stdout + proc.stderr).decode(errors='replace')
+        if proc.returncode != 0:
+            output = output.replace("CONNECTION ESTABLISHED", "CONNECTION FAILED")
+            return f"OPENSSL_EXIT_CODE={proc.returncode}\n{output}"
+        return output
     except subprocess.TimeoutExpired:
         return "TIMEOUT"
     except Exception as e:
         return f"ERROR: {e}"
+
+
+def _add_tls_verification(args):
+    """Добавляет обязательную проверку цепочки и hostname для s_client."""
+    verified_args = list(args)
+    if not verified_args or verified_args[0] != "s_client":
+        return verified_args
+    try:
+        servername = verified_args[verified_args.index("-servername") + 1]
+    except (ValueError, IndexError):
+        raise ValueError("Для TLS-проверки обязателен -servername")
+    if "-verify_hostname" not in verified_args:
+        verified_args.extend(["-verify_hostname", servername])
+    if "-verify_return_error" not in verified_args:
+        verified_args.append("-verify_return_error")
+    return verified_args
 
 def classify_failure(output):
     """Отличает проблему клиента от вердикта о сервере.
@@ -292,7 +316,7 @@ def resolve_all_ips(host):
         seen = []
         for family, _, _, _, sockaddr in ips:
             ip = sockaddr[0]
-            if ip not in seen and ':' not in ip:  # только IPv4
+            if ip not in seen:
                 seen.append(ip)
         return seen if seen else []
     except Exception:
@@ -668,13 +692,6 @@ def check_one(domain):
                 "-servername", host,
                 "-brief",
             ])
-            
-            # PQ блок
-            lines.append(f"{CYAN}━━━ PQ-подключение ━━━{NC}")
-            if "CONNECTION ESTABLISHED" in detail_pq:
-                lines.append(f"{GREEN}✅ Статус: поддерживается{NC}")
-            else:
-                render_failure(lines, detail_pq)
             
             # Обычный TLS блок
             lines.append("")

@@ -1,4 +1,18 @@
 #!/bin/bash
+
+if [ -r /opt/mtpr-simple/data/dependencies.env ]; then
+    MEKOPR_ROOT=/opt/mtpr-simple
+else
+    MEKOPR_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+fi
+if [ ! -r "$MEKOPR_ROOT/data/dependencies.env" ] || [ ! -r "$MEKOPR_ROOT/data/secure_fetch.sh" ]; then
+    echo "Не найден lock-файл зависимостей MEKOpr" >&2
+    exit 1
+fi
+# shellcheck disable=SC1091
+source "$MEKOPR_ROOT/data/dependencies.env"
+# shellcheck disable=SC1091
+source "$MEKOPR_ROOT/data/secure_fetch.sh"
 # remote_ctl/node_manager.sh – управление удалёнными нодами
 
 # ── Цвета ─────────────────────────────────────────────────────
@@ -17,6 +31,32 @@ log_info() { echo -e "  ${BLUE}[i]${NC} $1"; }
 log_success() { echo -e "  ${GREEN}[✓]${NC} $1"; }
 log_error() { echo -e "  ${RED}[✗]${NC} $1" >&2; }
 log_warning() { echo -e "  ${YELLOW}[!]${NC} $1"; }
+
+stage_remote_telemt_installer() {
+    local ip="$1" user="$2" port="$3" local_tmp remote_tmp
+    local_tmp=$(mktemp) || return 1
+    if ! secure_fetch_github_script telemt/telemt "$TELEMT_REF" install.sh "$local_tmp"; then
+        rm -f -- "$local_tmp"
+        return 1
+    fi
+    remote_tmp=$(ssh -p "$port" -o StrictHostKeyChecking=yes -o ConnectTimeout=5 \
+        "$user@$ip" 'mktemp /tmp/mekopr-telemt-install.XXXXXX') || {
+        rm -f -- "$local_tmp"
+        return 1
+    }
+    case "$remote_tmp" in
+        /tmp/mekopr-telemt-install.*) ;;
+        *) rm -f -- "$local_tmp"; return 1 ;;
+    esac
+    if ! scp -q -P "$port" -o StrictHostKeyChecking=yes -- \
+        "$local_tmp" "$user@$ip:$remote_tmp"; then
+        rm -f -- "$local_tmp"
+        ssh -p "$port" -o StrictHostKeyChecking=yes "$user@$ip" "rm -f -- '$remote_tmp'" || true
+        return 1
+    fi
+    rm -f -- "$local_tmp"
+    printf '%s' "$remote_tmp"
+}
 
 # ── Функция обрезки пробелов ──────────────────────────────
 trim() {
@@ -39,6 +79,7 @@ check_root
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 SERVERS_DIR="$SCRIPT_DIR/servers"
 mkdir -p "$SERVERS_DIR"
+chmod 0700 "$SERVERS_DIR"
 
 # ── Генерация SSH-ключа, если нет ──────────────────────────
 ensure_ssh_key() {
@@ -71,8 +112,12 @@ load_server_config() {
     local ip="$1"
     local conf_file="$SERVERS_DIR/$ip.conf"
     [[ ! -f "$conf_file" ]] && return 1
-    source "$conf_file"
-    echo "$USER" "$PORT"
+    local saved_user saved_port
+    saved_user=$(sed -n 's/^USER="\([A-Za-z_][A-Za-z0-9_-]*\)"$/\1/p' "$conf_file" | head -1)
+    saved_port=$(sed -n 's/^PORT="\([0-9][0-9]*\)"$/\1/p' "$conf_file" | head -1)
+    [[ "$saved_user" =~ ^[A-Za-z_][A-Za-z0-9_-]{0,31}$ ]] || return 1
+    [[ "$saved_port" =~ ^[0-9]+$ ]] && [ "$saved_port" -ge 1 ] && [ "$saved_port" -le 65535 ] || return 1
+    echo "$saved_user" "$saved_port"
 }
 
 # ── Сохранение конфига ──────────────────────────────────────
@@ -84,6 +129,7 @@ save_server_config() {
 USER="$user"
 PORT="$port"
 EOF
+    chmod 0600 "$SERVERS_DIR/$ip.conf"
 }
 
 # ── Проверка доступа по ключу ──────────────────────────────
@@ -118,6 +164,10 @@ parse_input() {
 
     if [[ -z "$ip" ]]; then
         echo "❌ Не удалось извлечь IP-адрес." >&2
+        return 1
+    fi
+    if [[ ! "$user" =~ ^[A-Za-z_][A-Za-z0-9_-]{0,31}$ ]]; then
+        echo "❌ Некорректное имя SSH-пользователя." >&2
         return 1
     fi
 
@@ -190,6 +240,11 @@ add_server() {
     local port
     read -r port
     port=${port:-22}
+    if [[ ! "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        log_error "Некорректный SSH-порт"
+        read -p "Нажмите Enter для продолжения..."
+        return 1
+    fi
 
     ensure_ssh_key
 
@@ -200,7 +255,7 @@ add_server() {
         log_info "Доступ по ключу отсутствует. Будет выполнена команда:"
         echo -e "  ${CYAN}ssh-copy-id -p $port $user@$ip${NC}"
         echo -e "  ${BOLD}Введите пароль пользователя ${GREEN}$user${NC}${BOLD}, если потребуется.${NC}"
-        ssh-copy-id -p "$port" "$user@$ip"
+        ssh-copy-id -o StrictHostKeyChecking=ask -p "$port" "$user@$ip"
         if [[ $? -eq 0 ]]; then
             log_success "Ключ успешно скопирован."
         else
@@ -240,9 +295,7 @@ remove_server() {
     log_info "Отзыв SSH-ключа на сервере..."
     local pub_key=$(cat ~/.ssh/id_rsa.pub)
     local escaped_key=$(echo "$pub_key" | sed 's/[\/&]/\\&/g')
-    # Используем таймаут и игнорируем ошибки
-    ssh -o ConnectTimeout=5 -o ConnectionAttempts=2 -p "$port" "$user@$ip" "sed -i '/$escaped_key/d' ~/.ssh/authorized_keys" 2>/dev/null || true
-    if [[ $? -eq 0 ]]; then
+    if ssh -o StrictHostKeyChecking=yes -o ConnectTimeout=5 -o ConnectionAttempts=2 -p "$port" "$user@$ip" "sed -i '/$escaped_key/d' ~/.ssh/authorized_keys" 2>/dev/null; then
         log_success "Ключ удалён из ~/.ssh/authorized_keys на сервере."
     else
         log_warning "Не удалось удалить ключ (возможно, его там нет или доступ уже потерян)."
@@ -279,11 +332,17 @@ clean_all_on_server() {
     log_info "Начинаем очистку сервера $ip..."
 
     # Все SSH-команды с таймаутом и подавлением ошибок
-    local SSH_OPTS="-o ConnectTimeout=5 -o ConnectionAttempts=2 -p $port"
+    local SSH_OPTS="-o StrictHostKeyChecking=yes -o ConnectTimeout=5 -o ConnectionAttempts=2 -p $port"
 
     # 1. Удаление Telemt (стандартный)
     log_info "Удаление Telemt (стандартный)..."
-    ssh $SSH_OPTS "$user@$ip" "curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh -s -- purge" 2>/dev/null || true
+    local remote_telemt_installer=""
+    remote_telemt_installer=$(stage_remote_telemt_installer "$ip" "$user" "$port") || true
+    if [ -n "$remote_telemt_installer" ]; then
+        ssh $SSH_OPTS "$user@$ip" "sh '$remote_telemt_installer' purge; rc=\$?; rm -f -- '$remote_telemt_installer'; exit \$rc" 2>/dev/null || true
+    else
+        log_warning "Не удалось подготовить закреплённый installer Telemt; удаление Telemt пропущено"
+    fi
 
     # 2. Удаление Telemt Docker
     log_info "Удаление Telemt (Docker)..."

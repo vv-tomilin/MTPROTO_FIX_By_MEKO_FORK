@@ -1,16 +1,17 @@
+> [!IMPORTANT]
+> Это неофициальный security-hardening fork [MTPROTO_FIX_By_MEKO](https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO), а не официальный релиз MEKO. Изменения и атрибуция описаны в [NOTICE.md](NOTICE.md); действует лицензия из [LICENSE](LICENSE).
+
 <div align="center">
 
 
-# MEKO | VPN and MTProto proxy manager - Fixer, Installer and Launcher  
+# Неофициальный MTProto Proxy Security Hardening Fork
 
 
-<a href="https://t.me/meko_mtprotofix">
-<img width="300" height="300" alt="Без имени-1" src="https://github.com/user-attachments/assets/8decca32-f96a-4b00-9e6c-1bf16bf94d33" />
+Оригинальный проект и авторство указаны в `NOTICE.md`.
 
 
 ---
-[![Latest Release](https://img.shields.io/github/v/release/Mekotofeuka/MTPROTO_FIX_By_MEKO?color=neon)](https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/releases/latest) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Stars](https://img.shields.io/github/stars/Mekotofeuka/MTPROTO_FIX_By_MEKO?style=social)](https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/stargazers) [![Forks](https://img.shields.io/github/forks/Mekotofeuka/MTPROTO_FIX_By_MEKO?style=social)](https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/network/members) [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/pulls)
-[![Telegram](https://telegram-badge.vercel.app/api/telegram-badge?channelId=@meko_mtprotofix)](https://t.me/meko_mtprotofix)
+[![License: MEKO Public License v3](https://img.shields.io/badge/license-MEKO_Public_License_v3-blue.svg)](LICENSE) [![Upstream](https://img.shields.io/badge/upstream-MTPROTO__FIX__By__MEKO-informational.svg)](https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO)
 
 </div>
 
@@ -83,12 +84,20 @@ _MEKO использует на данный момент [более точну
 
 **Внимание, данный скрипт платный, цена: 1 ⭐ на репозиторий**
 
-1. **Установить/обновить наш скрипт**:
+1. **Установить/обновить скрипт из проверенного локального checkout**:
    > P.S. прочитайте ReadMe/Документацию, чтобы сделать всё корректно, особенно если вы перешли с чьего-то видео/гайда, так как в тех, что имеются в сети сейчас - много неточностей и неправильных настроек.
-```Bash
-curl -fsSL https://raw.githubusercontent.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/main/install.sh | sudo bash
+```bash
+read -rp "URL вашего hardening-репозитория: " HARDENED_REPO_URL
+git clone -- "$HARDENED_REPO_URL" hardened-mtproto-proxy
+cd hardened-mtproto-proxy
+read -rp "40-символьный SHA проверенного защищённого релиза: " AUDITED_COMMIT
+[[ "$AUDITED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "Некорректный SHA" >&2; exit 1; }
+git checkout --detach "$AUDITED_COMMIT"
+sudo ./install_main.sh
 ```
-2. **Установить стандартный Telemt**, либо "**MTPROTO.zig**" или **MTG**
+
+Не запускайте изменяемую ветку `main` через `curl | sudo bash`. Полная инструкция по безопасному развёртыванию: [DEPLOYMENT_VPS.md](DEPLOYMENT_VPS.md).
+2. Для production установить проверяемый **Telemt в Docker по OCI digest** либо **MTG с SHA-256**. Обычные upstream installers Telemt/MTProto.zig требуют отдельного рискованного opt-in.
    > (все прокси можно поставить через меню нашего скрипта, ставить их заранее на сервер не обязательно, также - не важно в какой последовательности ставить: _прокси -> фикс_ или _фикс -> прокси_)
 4. Применить наш фикс к прокси нажав **[1] Меню установки MTProto FIX** в главном меню
 5. **Отключить встроенные MSS и SYN** из конфига телемт нажав **[5]** в **меню настроек телемт** _(если он уже был добавлен в конфиг телемт на сервер ранее)_
@@ -110,25 +119,21 @@ mekopr
 
 Установка только **v3** фикса на порт `443`:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/main/install.sh | sudo bash -s -- -fix -fix-port 443 -fix-type v3
+sudo ./install.sh -fix -fix-port 443 -fix-type v3
 ```
 
-Установка **Telemt** `3.4.25` и **фикса v3** на порт `443` с доменом `ozon.ru`, **ad_tag** `4c4140a4c40c5e2b080578a7e4e38c95` и **юзером** `Vasya` с секретом `68...dedb`:
+Установка проверяемого Docker-варианта **Telemt** выполняется интерактивно после установки launcher:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/main/install.sh | sudo bash -s -- -telemt -domain ozon.ru -port 443 -fix -fix-type v3 -version 3.4.25 -ad_tag 4c4140a4c40c5e2b080578a7e4e38c95 -user Vasya 68ae8284982465dfcb198342d01cdedb
+sudo /opt/mtpr-simple/proxys/telemt_in_docker1.sh
 ```
 
-
-Установка **Telemt** `3.4.25` и **фикса v3** на порт `443` с доменом `ozon.ru`, **ad_tag** `4c4140a4c40c5e2b080578a7e4e38c95` и **юзером** `Vasya` с секретом `68...dedb`, а также **доменом** `my.domain.com`:
-```bash
-curl -fsSL https://raw.githubusercontent.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/main/install.sh | sudo bash -s -- -telemt -domain ozon.ru -port 443 -fix -fix-type v3 -version 3.4.25 -ad_tag 4c4140a4c40c5e2b080578a7e4e38c95 -user Vasya 68ae8284982465dfcb198342d01cdedb -public_host my.domain.com
-```
+Флаги `-telemt` и `-zig` по умолчанию завершаются с ошибкой, поскольку их upstream installers скачивают вложенные артефакты без закреплённых checksums. Порядок безопасного развёртывания приведён в [DEPLOYMENT_VPS.md](DEPLOYMENT_VPS.md).
 
 ### Параметры для автоматической установки
 | Флаг                          | Значение по умолчанию      | Описание                             |
 | ----------------------------- | -------------------------- | ------------------------------------ |
-| `-telemt`                     | —                          | Установить [Telemt](https://github.com/telemt/telemt)                    |
-| `-zig`                        | —                          | Установить [MTProto.zig](https://github.com/sleep3r/mtproto.zig)               |
+| `-telemt`                     | —                          | Обычный installer Telemt; заблокирован без явного risk opt-in                    |
+| `-zig`                        | —                          | Installer MTProto.zig; заблокирован без явного risk opt-in               |
 | `-mtg`                        | —                          | Установить [MTG](https://github.com/9seconds/mtg)                       |
 | `-fix`                        | —                          | Установить [MTProto FIX](https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO)               |
 | `-no-fix`                     | —                          | Не устанавливать фикс                |
@@ -136,9 +141,9 @@ curl -fsSL https://raw.githubusercontent.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/mai
 | `-fix-port <порт>`            | значение `-port` или `443` | Порт, к которому применяется фикс    |
 | `-port <порт>`                | `443`                      | Порт прокси                          |
 | `-domain <домен>`             | `ozon.ru`                  | Домен для TLS-маскировки прокси      |
-| `-version <версия>`           | последняя                  | Версия [Telemt](https://github.com/telemt/telemt)                        |
+| `-version <версия>`           | из `data/dependencies.env` | Разрешена только закреплённая версия Telemt                        |
 | `-ad_tag <тег>`               | —                          | Добавить `ad_tag` в секцию `[general]` конфига Telemt     |
-| `-user <имя> [секрет]`        | —                          | Добавить пользователя в `[access.users]`. Если **секрет** не указан – будет запрошен или сгенерирован автоматически при нажатии **Enter** |
+| `-user <имя>`                 | —                          | Добавить пользователя в `[access.users]`; секрет запрашивается скрыто или генерируется и не передаётся через argv |
 | `-public_host <домен>`        | —                          | Добавить/обновить `public_host` в секции `[server.links]` конфига Telemt |
 | `-h`, `--help`                | —                          | Показать список доступных аргументов |
 

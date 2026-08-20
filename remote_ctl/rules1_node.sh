@@ -10,13 +10,20 @@ fi
 REMOTE_IP="$1"
 REMOTE_USER="$2"
 REMOTE_PORT="$3"
+MEKOPR_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 
 # ── Функция выполнения команд через SSH ─────────────────────
 ssh_exec() {
-    ssh -p "$REMOTE_PORT" -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$REMOTE_USER@$REMOTE_IP" "$1" 2>/dev/null
+    ssh -p "$REMOTE_PORT" -o StrictHostKeyChecking=yes -o ConnectTimeout=5 "$REMOTE_USER@$REMOTE_IP" "$1" 2>/dev/null
 }
 ssh_interactive() {
-    ssh -t -p "$REMOTE_PORT" -o StrictHostKeyChecking=no "$REMOTE_USER@$REMOTE_IP" "$1"
+    ssh -t -p "$REMOTE_PORT" -o StrictHostKeyChecking=yes "$REMOTE_USER@$REMOTE_IP" "$1"
+}
+scp_file() {
+    local source_file="$1"
+    local destination="$2"
+    scp -P "$REMOTE_PORT" -o StrictHostKeyChecking=yes -o ConnectTimeout=5 \
+        -- "$source_file" "$REMOTE_USER@$REMOTE_IP:$destination"
 }
 
 # ── Цвета ─────────────────────────────────────────────────────
@@ -160,19 +167,20 @@ else
 fi
 
 CHAIN="MTPR_SYNFIX"
-SSH_PORT=$(sshd -T 2>/dev/null | grep '^port ' | awk '{print $2}' || echo 22)
-
-if ! iptables -C INPUT -p tcp --dport "$SSH_PORT" -j ACCEPT 2>/dev/null; then
-    iptables -I INPUT 1 -p tcp --dport "$SSH_PORT" -j ACCEPT
-    echo "SSH-доступ (${SSH_PORT}) разрешён"
-fi
+CHAIN6="MTPR_SYNFIX6"
 
 iptables -t filter -N "$CHAIN" 2>/dev/null || true
 iptables -t filter -F "$CHAIN"
 
 if ! iptables -t filter -C INPUT -j "$CHAIN" 2>/dev/null; then
-    iptables -t filter -I INPUT 2 -j "$CHAIN"
+    iptables -t filter -I INPUT 1 -j "$CHAIN"
     echo "Цепочка $CHAIN подключена к INPUT"
+fi
+
+if command -v ip6tables >/dev/null 2>&1; then
+    ip6tables -t filter -N "$CHAIN6" 2>/dev/null || true
+    ip6tables -t filter -F "$CHAIN6"
+    ip6tables -t filter -C INPUT -j "$CHAIN6" 2>/dev/null || ip6tables -t filter -I INPUT 1 -j "$CHAIN6"
 fi
 
 IFS=',' read -ra PORT_ARRAY <<< "$PORTS"
@@ -184,6 +192,13 @@ for PORT in "${PORT_ARRAY[@]}"; do
         -m tcp --tcp-flags SYN SYN \
         -m length --length 64 \
         -m ttl --ttl-lt 65 \
+        -m hashlimit \
+        --hashlimit-name mt_ios_"$PORT" \
+        --hashlimit-mode srcip \
+        --hashlimit-upto 300/minute \
+        --hashlimit-burst 10 \
+        --hashlimit-htable-expire 60000 \
+        -m limit --limit 2000/second --limit-burst 2000 \
         -j ACCEPT
 
     iptables -t filter -A "$CHAIN" -p tcp --dport "$PORT" --syn \
@@ -194,10 +209,20 @@ for PORT in "${PORT_ARRAY[@]}"; do
         --hashlimit-burst 1 \
         --hashlimit-htable-expire 60000 \
         --hashlimit-htable-size 32768 \
+        -m limit --limit 1000/second --limit-burst 1000 \
         -j ACCEPT
 
     iptables -t filter -A "$CHAIN" -p tcp --dport "$PORT" --syn \
         -j REJECT --reject-with tcp-reset
+
+    if command -v ip6tables >/dev/null 2>&1; then
+        ip6tables -t filter -A "$CHAIN6" -p tcp --dport "$PORT" --syn \
+            -m hashlimit --hashlimit-name mt6_"$PORT" --hashlimit-mode srcip \
+            --hashlimit-upto 54/minute --hashlimit-burst 1 \
+            --hashlimit-htable-expire 60000 \
+            -m limit --limit 1000/second --limit-burst 1000 -j ACCEPT
+        ip6tables -t filter -A "$CHAIN6" -p tcp --dport "$PORT" --syn -j REJECT --reject-with tcp-reset
+    fi
 done
 APPLY_SCRIPT_EOF
 )
@@ -214,29 +239,37 @@ else
 fi
 
 CHAIN="MTPR_SYNFIX"
-SSH_PORT=$(sshd -T 2>/dev/null | grep '^port ' | awk '{print $2}' || echo 22)
-
-if ! iptables -C INPUT -p tcp --dport "$SSH_PORT" -j ACCEPT 2>/dev/null; then
-    iptables -I INPUT 1 -p tcp --dport "$SSH_PORT" -j ACCEPT
-    echo "SSH-доступ (${SSH_PORT}) разрешён"
-fi
+CHAIN6="MTPR_SYNFIX6"
 
 iptables -t filter -N "$CHAIN" 2>/dev/null || true
 iptables -t filter -F "$CHAIN"
 
 if ! iptables -t filter -C INPUT -j "$CHAIN" 2>/dev/null; then
-    iptables -t filter -I INPUT 2 -j "$CHAIN"
+    iptables -t filter -I INPUT 1 -j "$CHAIN"
     echo "Цепочка $CHAIN подключена к INPUT"
 fi
 
-iptables -t mangle -A PREROUTING -m u32 --u32 "32 & 0x000FFFFF = 0x0002FFFF && 40 & 0xFF000000 = 0x02000000 && 44 & 0xFFFF0000 = 0x01030000 && 48 & 0xFFFFFF00 = 0x01010800 && 60 & 0xFFFFFFFF = 0x04020000" -j MARK --set-mark 0x400
+if command -v ip6tables >/dev/null 2>&1; then
+    ip6tables -t filter -N "$CHAIN6" 2>/dev/null || true
+    ip6tables -t filter -F "$CHAIN6"
+    ip6tables -t filter -C INPUT -j "$CHAIN6" 2>/dev/null || ip6tables -t filter -I INPUT 1 -j "$CHAIN6"
+fi
 
 IFS=',' read -ra PORT_ARRAY <<< "$PORTS"
 for PORT in "${PORT_ARRAY[@]}"; do
     PORT=$(echo "$PORT" | xargs)
     [ -z "$PORT" ] && continue
 
-    iptables -t filter -A "$CHAIN" -p tcp --dport "$PORT" --syn -m mark --mark 0x400 -j ACCEPT
+    U32_FILTER="32 & 0x000FFFFF = 0x0002FFFF && 40 & 0xFF000000 = 0x02000000 && 44 & 0xFFFF0000 = 0x01030000 && 48 & 0xFFFFFF00 = 0x01010800 && 60 & 0xFFFFFFFF = 0x04020000"
+    iptables -t mangle -C PREROUTING -p tcp --dport "$PORT" -m u32 --u32 "$U32_FILTER" -j MARK --set-mark 0x400 2>/dev/null || \
+        iptables -t mangle -A PREROUTING -p tcp --dport "$PORT" -m u32 --u32 "$U32_FILTER" -j MARK --set-mark 0x400
+
+    iptables -t filter -A "$CHAIN" -p tcp --dport "$PORT" --syn \
+        -m mark --mark 0x400 \
+        -m hashlimit --hashlimit-name mt_ios_"$PORT" --hashlimit-mode srcip \
+        --hashlimit-upto 300/minute --hashlimit-burst 10 \
+        --hashlimit-htable-expire 60000 \
+        -m limit --limit 2000/second --limit-burst 2000 -j ACCEPT
 
     iptables -t filter -A "$CHAIN" -p tcp --dport "$PORT" --syn \
         -m hashlimit \
@@ -246,10 +279,20 @@ for PORT in "${PORT_ARRAY[@]}"; do
         --hashlimit-burst 1 \
         --hashlimit-htable-expire 60000 \
         --hashlimit-htable-size 32768 \
+        -m limit --limit 1000/second --limit-burst 1000 \
         -j ACCEPT
 
     iptables -t filter -A "$CHAIN" -p tcp --dport "$PORT" --syn \
         -j REJECT --reject-with tcp-reset
+
+    if command -v ip6tables >/dev/null 2>&1; then
+        ip6tables -t filter -A "$CHAIN6" -p tcp --dport "$PORT" --syn \
+            -m hashlimit --hashlimit-name mt6_"$PORT" --hashlimit-mode srcip \
+            --hashlimit-upto 54/minute --hashlimit-burst 1 \
+            --hashlimit-htable-expire 60000 \
+            -m limit --limit 1000/second --limit-burst 1000 -j ACCEPT
+        ip6tables -t filter -A "$CHAIN6" -p tcp --dport "$PORT" --syn -j REJECT --reject-with tcp-reset
+    fi
 done
 APPLY_SCRIPT_EOF
 )
@@ -259,7 +302,7 @@ APPLY_SCRIPT_EOF
     ssh_exec "mkdir -p /opt/mtpr-simple && cat > /opt/mtpr-simple/apply-mtpr-synfix.sh << 'EOF'
 $script_content
 EOF
-chmod +x /opt/mtpr-simple/apply-mtpr-synfix.sh"
+chown root:root /opt/mtpr-simple/apply-mtpr-synfix.sh && chmod 0755 /opt/mtpr-simple/apply-mtpr-synfix.sh"
 }
 
 # ── Генерация systemd юнита (удалённо) ──────────────────────
@@ -378,14 +421,20 @@ install_syn_fix() {
     # ── Если выбран Zapret2 fix ────────────────────────────────
     if [ "$FIX_TYPE" = "zapret2" ]; then
         # Проверяем наличие zapret2_fix.sh на удалённом сервере и запускаем его меню
-        if ssh_exec "[ -f /opt/mtpr-simple/data/zapret2_fix.sh ]"; then
+        if ssh_exec "[ -f /opt/mtpr-simple/data/zapret2_fix.sh ] && [ -f /opt/mtpr-simple/data/dependencies.env ]"; then
             log_info "Запуск меню Zapret2 на удалённом сервере..."
             ssh_interactive "bash /opt/mtpr-simple/data/zapret2_fix.sh"
         else
-            log_error "zapret2_fix.sh не найден на удалённом сервере, скачиваю..."
-            ssh_exec "mkdir -p /opt/mtpr-simple/data && curl -fsSL https://raw.githubusercontent.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/main/data/zapret2_fix.sh -o /opt/mtpr-simple/data/zapret2_fix.sh && chmod +x /opt/mtpr-simple/data/zapret2_fix.sh"
-            log_success "zapret2_fix.sh скачан, запускаю..."
-            ssh_interactive "bash /opt/mtpr-simple/data/zapret2_fix.sh"
+            log_warning "zapret2_fix.sh не найден; передаю проверенную локальную копию..."
+            ssh_exec "install -d -m 0755 /opt/mtpr-simple/data"
+            if scp_file "$MEKOPR_ROOT/data/zapret2_fix.sh" /opt/mtpr-simple/data/zapret2_fix.sh && \
+               scp_file "$MEKOPR_ROOT/data/dependencies.env" /opt/mtpr-simple/data/dependencies.env; then
+                ssh_exec "chown root:root /opt/mtpr-simple/data/zapret2_fix.sh /opt/mtpr-simple/data/dependencies.env && chmod 0755 /opt/mtpr-simple/data/zapret2_fix.sh && chmod 0644 /opt/mtpr-simple/data/dependencies.env"
+                log_success "Локальная копия передана, запускаю..."
+                ssh_interactive "bash /opt/mtpr-simple/data/zapret2_fix.sh"
+            else
+                log_error "Не удалось передать zapret2_fix.sh"
+            fi
         fi
         return 0
     fi
@@ -466,22 +515,29 @@ NFT_WRAPPER_EOF
 )
 
         if [ "$FIX_TYPE" = "docker_smart" ]; then
-            nft_script_content+=$'\n'"# 1. iOS по TCP fingerprint → ACCEPT без лимита"
+            nft_script_content+=$'\n'"# Fingerprint получает ограниченное повышенное окно, не безлимитный ACCEPT"
             for port in "${valid_ports[@]}"; do
-                nft_script_content+=$'\n'"nft \"add rule inet mtpr_synfix input tcp dport $port tcp flags & (syn|ack) == syn @th,108,20 0x2ffff @th,160,16 0x204 @th,192,16 0x103 @th,224,24 0x10108 @th,320,32 0x4020000 counter accept comment \\\"ios_accept\\\"\""
-                nft_script_content+=$'\n'"nft \"add rule inet mtpr_synfix input tcp dport $port tcp flags & (syn|ack) == syn meter mtpr_other { ip saddr timeout 60s limit rate 54/minute burst 1 packets } counter accept comment \\\"other_accept\\\"\""
-                nft_script_content+=$'\n'"nft \"add rule inet mtpr_synfix input tcp dport $port tcp flags & (syn|ack) == syn counter reject with icmp type host-unreachable comment \\\"other_reject\\\"\""
+                nft_script_content+=$'\n'"nft \"add rule inet mtpr_synfix input meta nfproto ipv4 tcp dport $port tcp flags & (syn|ack) == syn limit rate over 3000/second burst 3000 packets counter reject with tcp reset comment \\\"global_ipv4_over_limit\\\"\""
+                nft_script_content+=$'\n'"nft \"add rule inet mtpr_synfix input meta nfproto ipv6 tcp dport $port tcp flags & (syn|ack) == syn limit rate over 3000/second burst 3000 packets counter reject with tcp reset comment \\\"global_ipv6_over_limit\\\"\""
+                nft_script_content+=$'\n'"nft \"add rule inet mtpr_synfix input meta nfproto ipv4 tcp dport $port tcp flags & (syn|ack) == syn @th,108,20 0x2ffff @th,160,16 0x204 @th,192,16 0x103 @th,224,24 0x10108 @th,320,32 0x4020000 meter mtpr_ios_${port}_v4 { ip saddr timeout 60s limit rate 300/minute burst 10 packets } counter accept comment \\\"ios_limited_accept\\\"\""
+                nft_script_content+=$'\n'"nft \"add rule inet mtpr_synfix input meta nfproto ipv4 tcp dport $port tcp flags & (syn|ack) == syn meter mtpr_other_${port}_v4 { ip saddr timeout 60s limit rate 54/minute burst 1 packets } counter accept comment \\\"other_ipv4_accept\\\"\""
+                nft_script_content+=$'\n'"nft \"add rule inet mtpr_synfix input meta nfproto ipv4 tcp dport $port tcp flags & (syn|ack) == syn counter reject with tcp reset comment \\\"other_ipv4_reject\\\"\""
+                nft_script_content+=$'\n'"nft \"add rule inet mtpr_synfix input meta nfproto ipv6 tcp dport $port tcp flags & (syn|ack) == syn meter mtpr_other_${port}_v6 { ip6 saddr timeout 60s limit rate 54/minute burst 1 packets } counter accept comment \\\"ipv6_accept\\\"\""
+                nft_script_content+=$'\n'"nft \"add rule inet mtpr_synfix input meta nfproto ipv6 tcp dport $port tcp flags & (syn|ack) == syn counter reject with tcp reset comment \\\"ipv6_reject\\\"\""
             done
         else
             for port in "${valid_ports[@]}"; do
-                nft_script_content+=$'\n'"nft \"add rule inet mtpr_synfix input tcp dport $port tcp flags & (syn|ack) == syn meter mtpr_classic { ip saddr timeout 60s limit rate 1/second burst 1 packets } counter drop comment \\\"classic_drop\\\"\""
+                nft_script_content+=$'\n'"nft \"add rule inet mtpr_synfix input meta nfproto ipv4 tcp dport $port tcp flags & (syn|ack) == syn limit rate over 3000/second burst 3000 packets counter reject with tcp reset comment \\\"global_ipv4_over_limit\\\"\""
+                nft_script_content+=$'\n'"nft \"add rule inet mtpr_synfix input meta nfproto ipv6 tcp dport $port tcp flags & (syn|ack) == syn limit rate over 3000/second burst 3000 packets counter reject with tcp reset comment \\\"global_ipv6_over_limit\\\"\""
+                nft_script_content+=$'\n'"nft \"add rule inet mtpr_synfix input meta nfproto ipv4 tcp dport $port tcp flags & (syn|ack) == syn meter mtpr_classic_${port}_v4 { ip saddr timeout 60s limit rate over 54/minute burst 1 packets } counter reject with tcp reset comment \\\"classic_ipv4_over_limit\\\"\""
+                nft_script_content+=$'\n'"nft \"add rule inet mtpr_synfix input meta nfproto ipv6 tcp dport $port tcp flags & (syn|ack) == syn meter mtpr_classic_${port}_v6 { ip6 saddr timeout 60s limit rate over 54/minute burst 1 packets } counter reject with tcp reset comment \\\"classic_ipv6_over_limit\\\"\""
             done
         fi
 
         ssh_exec "cat > $NFT_SCRIPT << 'EOF'
 $nft_script_content
 EOF
-chmod +x $NFT_SCRIPT"
+chown root:root $NFT_SCRIPT && chmod 0755 $NFT_SCRIPT"
 
         # Применяем скрипт
         ssh_interactive "bash $NFT_SCRIPT"
@@ -660,6 +716,19 @@ remove_syn_fix() {
         log_info "Цепочка $SYNFIX_CHAIN удалена"
     fi
 
+    ssh_exec "if command -v ip6tables >/dev/null 2>&1; then ip6tables -D INPUT -j MTPR_SYNFIX6 2>/dev/null || true; ip6tables -F MTPR_SYNFIX6 2>/dev/null || true; ip6tables -X MTPR_SYNFIX6 2>/dev/null || true; fi"
+
+    # Неотличимое пользовательское SSH ACCEPT автоматически не удаляем, чтобы
+    # не оборвать единственный административный доступ.
+    local legacy_ssh_port
+    legacy_ssh_port=$(ssh_exec "sshd -T 2>/dev/null | awk '/^port / { print \$2; exit }'")
+    legacy_ssh_port=${legacy_ssh_port:-22}
+    if [[ "$legacy_ssh_port" =~ ^[0-9]+$ ]]; then
+        if ssh_exec "iptables -C INPUT -p tcp --dport $legacy_ssh_port -j ACCEPT 2>/dev/null"; then
+            log_warning "На ноде осталось глобальное SSH ACCEPT для порта $legacy_ssh_port; проверьте и удалите его вручную из резервной сессии"
+        fi
+    fi
+
     # Удаляем правила u32 из mangle
     local u32_filter="32 & 0x000FFFFF = 0x0002FFFF && 40 & 0xFF000000 = 0x02000000 && 44 & 0xFFFF0000 = 0x01030000 && 48 & 0xFFFFFF00 = 0x01010800 && 60 & 0xFFFFFFFF = 0x04020000"
     if ssh_exec "iptables -t mangle -L PREROUTING -n 2>/dev/null | grep -q \"$u32_filter\""; then
@@ -691,6 +760,7 @@ remove_syn_fix() {
 
     ssh_exec "rm -f \"$PORT_FILE\""
     ssh_exec "rm -f /etc/systemd/system/mtpr-synfix.service"
+    ssh_exec "rm -f /opt/mtpr-simple/apply-mtpr-synfix.sh"
 
     # Удаляем nftables-сервис
     ssh_exec "systemctl stop mtpr-nft-synfix.service 2>/dev/null || true"
@@ -743,14 +813,20 @@ main_menu() {
                 ;;
             4)
                 echo ""
-                if ssh_exec "[ -f /opt/mtpr-simple/data/zapret2_fix.sh ]"; then
+                if ssh_exec "[ -f /opt/mtpr-simple/data/zapret2_fix.sh ] && [ -f /opt/mtpr-simple/data/dependencies.env ]"; then
                     log_info "Запуск меню Zapret2 на удалённом сервере..."
                     ssh_interactive "bash /opt/mtpr-simple/data/zapret2_fix.sh"
                 else
-                    log_error "zapret2_fix.sh не найден на удалённом сервере, скачиваю..."
-                    ssh_exec "mkdir -p /opt/mtpr-simple/data && curl -fsSL https://raw.githubusercontent.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/main/data/zapret2_fix.sh -o /opt/mtpr-simple/data/zapret2_fix.sh && chmod +x /opt/mtpr-simple/data/zapret2_fix.sh"
-                    log_success "zapret2_fix.sh скачан, запускаю..."
-                    ssh_interactive "bash /opt/mtpr-simple/data/zapret2_fix.sh"
+                    log_warning "zapret2_fix.sh не найден; передаю проверенную локальную копию..."
+                    ssh_exec "install -d -m 0755 /opt/mtpr-simple/data"
+                    if scp_file "$MEKOPR_ROOT/data/zapret2_fix.sh" /opt/mtpr-simple/data/zapret2_fix.sh && \
+                       scp_file "$MEKOPR_ROOT/data/dependencies.env" /opt/mtpr-simple/data/dependencies.env; then
+                        ssh_exec "chown root:root /opt/mtpr-simple/data/zapret2_fix.sh /opt/mtpr-simple/data/dependencies.env && chmod 0755 /opt/mtpr-simple/data/zapret2_fix.sh && chmod 0644 /opt/mtpr-simple/data/dependencies.env"
+                        log_success "Локальная копия передана, запускаю..."
+                        ssh_interactive "bash /opt/mtpr-simple/data/zapret2_fix.sh"
+                    else
+                        log_error "Не удалось передать zapret2_fix.sh"
+                    fi
                 fi
                 ;;
             0)

@@ -1,13 +1,14 @@
+> [!IMPORTANT]
+> 这是 [MTPROTO_FIX_By_MEKO](https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO) 的非官方安全加固分支，并非 MEKO 官方版本。请参阅 [NOTICE.md](NOTICE.md) 和 [LICENSE](LICENSE)。
+
 <div align="center">
 
-# MEKO | VPN 和 MTProto 代理管理器 - 安装、启动与修复工具
+# 非官方 MTProto 代理安全加固分支
 
-<a href="https://t.me/meko_mtprotofix">
-<img width="300" height="300" alt="logo" src="https://github.com/user-attachments/assets/8decca32-f96a-4b00-9e6c-1bf16bf94d33" />
+原始项目和署名记录在 `NOTICE.md` 中。
 
 ---
-[![最新发布](https://img.shields.io/github/v/release/Mekotofeuka/MTPROTO_FIX_By_MEKO?color=neon)](https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/releases/latest) [![许可证: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Stars](https://img.shields.io/github/stars/Mekotofeuka/MTPROTO_FIX_By_MEKO?style=social)](https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/stargazers) [![Forks](https://img.shields.io/github/forks/Mekotofeuka/MTPROTO_FIX_By_MEKO?style=social)](https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/network/members) [![PRs 欢迎](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/pulls)
-[![Telegram](https://telegram-badge.vercel.app/api/telegram-badge?channelId=@meko_mtprotofix)](https://t.me/meko_mtprotofix)
+[![许可证: MEKO Public License v3](https://img.shields.io/badge/license-MEKO_Public_License_v3-blue.svg)](LICENSE) [![上游项目](https://img.shields.io/badge/upstream-MTPROTO__FIX__By__MEKO-informational.svg)](https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO)
 
 </div>
 
@@ -78,8 +79,16 @@ _MEKO 目前使用 [更精确的 V3 版本](https://github.com/Mekotofeuka/MTPRO
 
 **注意：本脚本收费，价格：给仓库点一个 ⭐**
 
-1. **安装/更新我们的脚本**：
-<pre><code>curl -fsSL https://raw.githubusercontent.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/main/install.sh | sudo bash</code></pre>
+1. **从经过审核的本地 checkout 安装/更新脚本**：
+<pre><code>read -rp "请输入您的加固仓库 URL: " HARDENED_REPO_URL
+git clone -- "$HARDENED_REPO_URL" hardened-mtproto-proxy
+cd hardened-mtproto-proxy
+read -rp "请输入已审核版本的 40 位 SHA: " AUDITED_COMMIT
+[[ "$AUDITED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || exit 1
+git checkout --detach "$AUDITED_COMMIT"
+sudo ./install_main.sh</code></pre>
+
+不要把可变的分支通过管道直接交给 root shell。加固部署流程见 `DEPLOYMENT_VPS.md`。
 2. **安装标准 Telemt**，或 "**MTPROTO.zig**" 或 **MTG**
    > （所有代理均可通过脚本菜单安装，无需提前在服务器上安装，且安装顺序无关紧要——先代理后修复或先修复后代理均可）
 4. 在主菜单中按 **[1] 安装 SYN FIX** 应用修复

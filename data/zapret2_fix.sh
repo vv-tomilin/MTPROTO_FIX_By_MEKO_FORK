@@ -159,6 +159,8 @@ load_settings() {
         fingerprint|ttl) ;;
         *) NFT_IOS_DETECT="fingerprint" ;;
     esac
+    [[ "$ZAPRET2_FWMARK" =~ ^0x[0-9A-Fa-f]{1,8}$ ]] || ZAPRET2_FWMARK="0x40000000"
+    [[ "$ZAPRET2_QNUM" =~ ^[0-9]+$ ]] && [ "$ZAPRET2_QNUM" -ge 1 ] && [ "$ZAPRET2_QNUM" -le 65535 ] || ZAPRET2_QNUM="200"
 }
 
 # ── Zapret2 настройки по умолчанию ─────────────────────────────
@@ -183,6 +185,36 @@ ZAPRET2_APPLIED="false"
 ZAPRET2_SERVICE_ENABLED="false"
 ZAPRET2_RELEASE_REPO="Liafanx/MTproxy-reanimation"
 ZAPRET2_RELEASE_TAG="zapret2-bundle"
+WATCHER_SCRIPT="/usr/local/sbin/mtpr-zapret2-watch.sh"
+WATCHER_UNIT="mtpr-zapret2-watch.service"
+
+# Совместимость с SYN limiter из data/rules.sh. Ранее эти функции
+# вызывались, но не были определены, из-за чего меню сообщало ложный успех.
+remove_nft_rules() {
+    nft delete table inet "${NFT_TABLE:-mtpr_synfix}" 2>/dev/null || true
+}
+
+remove_service() {
+    systemctl stop mtpr-nft-synfix.service 2>/dev/null || true
+    systemctl disable mtpr-nft-synfix.service 2>/dev/null || true
+}
+
+apply_nft_rules() {
+    [ -x /opt/mtpr-simple/mtpr-synfix-nft.sh ] || return 1
+    /bin/sh /opt/mtpr-simple/mtpr-synfix-nft.sh
+}
+
+install_service() {
+    [ -f /etc/systemd/system/mtpr-nft-synfix.service ] || return 1
+    systemctl daemon-reload
+    systemctl enable --now mtpr-nft-synfix.service
+}
+
+docker_container_ip() {
+    local container_name="$1"
+    [[ "$container_name" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
+    docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$container_name" 2>/dev/null
+}
 
 # ── Проверка статуса Zapret2 ────────────────────────────────
 zapret2_status() {
@@ -257,14 +289,17 @@ zapret2_has_residue() {
 zapret2_cleanup_failed_install() {
     systemctl stop "$ZAPRET2_SERVICE" 2>/dev/null || true
     systemctl disable "$ZAPRET2_SERVICE" 2>/dev/null || true
+    systemctl stop "$WATCHER_UNIT" 2>/dev/null || true
+    systemctl disable "$WATCHER_UNIT" 2>/dev/null || true
 
     pkill -9 -f "$ZAPRET2_BIN" 2>/dev/null || true
-    pkill -9 -x nfqws2 2>/dev/null || true
 
     nft delete table ip "${ZAPRET2_NFT_TABLE}" 2>/dev/null || true
 
     rm -f "/etc/systemd/system/${ZAPRET2_SERVICE}"
+    rm -f "/etc/systemd/system/${WATCHER_UNIT}"
     rm -f "/usr/local/sbin/mtpr-zapret2-start.sh"
+    rm -f "$WATCHER_SCRIPT"
     systemctl daemon-reload 2>/dev/null || true
     systemctl reset-failed "$ZAPRET2_SERVICE" 2>/dev/null || true
 
@@ -291,23 +326,61 @@ zapret2_download_bundle() {
         *)     log_error "Неподдерживаемая архитектура: $_arch"; return 1 ;;
     esac
 
-    local _ver="v1.0.3"
-    local _url="https://github.com/bol-van/zapret2/releases/download/${_ver}/zapret2-${_ver}.tar.gz"
-    local _tmp="/tmp/zapret2-release.tar.gz"
-    local _tmpdir="/tmp/zapret2-unpack-$$"
+    local _lock_file="/opt/mtpr-simple/data/dependencies.env"
+    if [ ! -r "$_lock_file" ]; then
+        _lock_file="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/dependencies.env"
+    fi
+    if [ ! -r "$_lock_file" ]; then
+        log_error "Не найден lock-файл зависимостей"
+        return 1
+    fi
+    # shellcheck disable=SC1091
+    source "$_lock_file"
+    if [[ ! "$ZAPRET2_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
+       [[ ! "$ZAPRET2_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]] || \
+       [[ ! "$ZAPRET2_CHECKSUMS_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+        log_error "Некорректная фиксация версии zapret2"
+        return 1
+    fi
+    local _ver="$ZAPRET2_VERSION"
+    local _release_base="https://github.com/bol-van/zapret2/releases/download/${_ver}"
+    local _url="${_release_base}/zapret2-${_ver}.tar.gz"
+    local _tmpdir
+    _tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/zapret2-unpack.XXXXXX") || return 1
+    chmod 0700 "$_tmpdir"
+    local _tmp="${_tmpdir}/zapret2-release.tar.gz"
 
     log_info "Архитектура: ${_arch} (${_zapret_arch})"
     log_info "Скачивание: ${_url}"
 
-    if ! curl -fsSL --max-time 120 -o "$_tmp" "$_url"; then
+    if ! curl --proto '=https' --tlsv1.2 -fsSL --max-time 120 -o "$_tmp" "$_url"; then
         log_error "Не удалось скачать zapret2 релиз"
-        rm -f "$_tmp"
+        rm -rf "$_tmpdir"
+        return 1
+    fi
+    if ! printf '%s  %s\n' "$ZAPRET2_ARCHIVE_SHA256" "$_tmp" | sha256sum -c - >/dev/null 2>&1; then
+        log_error "SHA-256 архива zapret2 не совпал"
+        rm -rf "$_tmpdir"
+        return 1
+    fi
+
+    if ! curl --proto '=https' --tlsv1.2 -fsSL --max-time 30 -o "${_tmpdir}/sha256sum.txt" "${_release_base}/sha256sum.txt"; then
+        log_error "Не удалось скачать официальный список SHA-256 zapret2"
+        rm -rf "$_tmpdir"
+        return 1
+    fi
+    if ! printf '%s  %s\n' "$ZAPRET2_CHECKSUMS_SHA256" "${_tmpdir}/sha256sum.txt" | sha256sum -c - >/dev/null 2>&1; then
+        log_error "SHA-256 списка контрольных сумм zapret2 не совпал"
+        rm -rf "$_tmpdir"
         return 1
     fi
 
     log_info "Распаковка..."
-    rm -rf "$_tmpdir"
-    mkdir -p "$_tmpdir"
+    if tar -tzf "$_tmp" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
+        log_error "Архив zapret2 содержит небезопасные пути"
+        rm -rf "$_tmpdir"
+        return 1
+    fi
     if ! tar xzf "$_tmp" -C "$_tmpdir"; then
         log_error "Не удалось распаковать архив"
         rm -f "$_tmp"
@@ -315,6 +388,13 @@ zapret2_download_bundle() {
         return 1
     fi
     rm -f "$_tmp"
+
+    if ! grep -q "/binaries/${_zapret_arch}/nfqws2$" "${_tmpdir}/sha256sum.txt" || \
+       ! (cd "$_tmpdir" && sha256sum --ignore-missing -c sha256sum.txt >/dev/null); then
+        log_error "Проверка SHA-256 бинарников zapret2 не пройдена"
+        rm -rf "$_tmpdir"
+        return 1
+    fi
 
     local _root
     _root=$(find "$_tmpdir" -maxdepth 1 -mindepth 1 -type d | head -1)
@@ -363,12 +443,14 @@ zapret2_download_bundle() {
     fi
     log_info "Lua файлы: ${_luasrc}"
 
-    mkdir -p "${ZAPRET2_DIR}/bin" "${ZAPRET2_LUA_DIR}" "${ZAPRET2_ETC_DIR}"
+    install -d -o root -g root -m 0755 "${ZAPRET2_DIR}/bin" "${ZAPRET2_LUA_DIR}"
+    install -d -o root -g root -m 0700 "${ZAPRET2_ETC_DIR}"
 
     cp -f "${_bindir}/nfqws2" "${ZAPRET2_DIR}/bin/"
     [ -f "${_bindir}/mdig" ] && cp -f "${_bindir}/mdig" "${ZAPRET2_DIR}/bin/"
     [ -f "${_bindir}/ip2net" ] && cp -f "${_bindir}/ip2net" "${ZAPRET2_DIR}/bin/"
-    chmod +x "${ZAPRET2_DIR}/bin/"*
+    chown root:root "${ZAPRET2_DIR}/bin/"*
+    chmod 0755 "${ZAPRET2_DIR}/bin/"*
 
     local _lua_files="zapret-lib zapret-antidpi zapret-auto"
     for _name in $_lua_files; do
@@ -581,7 +663,8 @@ echo "MTproxy-reanimation: NFT table \$TABLE applied (port=\$PORT qnum=\$QNUM fw
 # Запускаем nfqws2
 exec ${ZAPRET2_BIN} @${ZAPRET2_CONF}
 NFTSTART
-    chmod +x "$_nft_script"
+    chown root:root "$_nft_script"
+    chmod 0755 "$_nft_script"
 
     cat > "/etc/systemd/system/${ZAPRET2_SERVICE}" << EOF
 [Unit]
@@ -597,6 +680,17 @@ Restart=on-failure
 RestartSec=2
 StandardOutput=journal
 StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 
 [Install]
 WantedBy=multi-user.target
@@ -607,29 +701,11 @@ EOF
     systemctl reset-failed "${ZAPRET2_SERVICE}" 2>/dev/null || true
     log_success "Служба создана: ${ZAPRET2_SERVICE}"
 
-    # Если bridge+precise, запускаем watcher
+    # Автоматический Docker watcher не создаётся: доступ к Docker daemon
+    # эквивалентен root-доступу к хосту. Изменение IP контейнера требует
+    # контролируемого перезапуска службы администратором.
     if [ "$_is_bridge" = "true" ] && [ "$_is_precise" = "true" ] && [ -n "$_container" ]; then
-        generate_bridge_watch_script
-        cat > "/etc/systemd/system/${WATCHER_UNIT}" << EOF
-[Unit]
-Description=MTproxy-reanimation Docker bridge watcher
-Requires=docker.service
-After=docker.service network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=${WATCHER_SCRIPT}
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        systemctl daemon-reload
-        systemctl enable "$WATCHER_UNIT" 2>/dev/null || true
-        systemctl restart "$WATCHER_UNIT" 2>/dev/null || true
-        log_success "Установлена watcher-служба для точного Docker-режима (zapret2)"
+        log_warn "Docker watcher отключён из соображений безопасности; после смены IP контейнера перезапустите ${ZAPRET2_SERVICE}"
     fi
 }
 
@@ -919,7 +995,7 @@ zapret2_install() {
     # Zapret2 fix заменяет SYN limiter — отключаем его если активен
     local _had_limiter="false"
     local _had_limiter_service="false"
-    if [ "${NFT_SERVICE_ENABLED:-false}" = "true" ] || nft list table inet "${NFT_TABLE:-telemt_limit}" &>/dev/null 2>&1; then
+    if [ "${NFT_SERVICE_ENABLED:-false}" = "true" ] || nft list table inet "${NFT_TABLE:-mtpr_synfix}" &>/dev/null 2>&1; then
         _had_limiter="true"
         [ "${NFT_SERVICE_ENABLED:-false}" = "true" ] && _had_limiter_service="true"
         echo ""
@@ -1011,9 +1087,33 @@ zapret2_install() {
     echo -e "  ${DIM}Параметры можно изменить в меню [z] → Настройки.${NC}"
 }
 
-# ── Удаление Zapret2 ─────────────────────────────────────────
+# ── Полное удаление Zapret2 без интерактивных вопросов ──────
+zapret2_purge() {
+    zapret2_stop 2>/dev/null || true
+    systemctl stop "$ZAPRET2_SERVICE" 2>/dev/null || true
+    systemctl disable "$ZAPRET2_SERVICE" 2>/dev/null || true
+    systemctl stop "$WATCHER_UNIT" 2>/dev/null || true
+    systemctl disable "$WATCHER_UNIT" 2>/dev/null || true
+    pkill -f "$ZAPRET2_BIN" 2>/dev/null || true
+    nft delete table ip "$ZAPRET2_NFT_TABLE" 2>/dev/null || true
+
+    rm -f "/etc/systemd/system/${ZAPRET2_SERVICE}"
+    rm -f "/etc/systemd/system/${WATCHER_UNIT}"
+    rm -f "/usr/local/sbin/mtpr-zapret2-start.sh"
+    rm -f "$WATCHER_SCRIPT"
+    rm -f "$ZAPRET2_CONF" "$ZAPRET2_LUA"
+    rm -rf "$ZAPRET2_DIR" "$ZAPRET2_ETC_DIR"
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl reset-failed "$ZAPRET2_SERVICE" "$WATCHER_UNIT" 2>/dev/null || true
+
+    ZAPRET2_APPLIED="false"
+    ZAPRET2_SERVICE_ENABLED="false"
+    save_settings 2>/dev/null || true
+}
+
+# ── Интерактивное удаление Zapret2 ──────────────────────────
 zapret2_remove() {
-    if [ "${ZAPRET2_APPLIED:-false}" != "true" ]; then
+    if ! zapret2_has_residue && [ "${ZAPRET2_APPLIED:-false}" != "true" ]; then
         log_info "Zapret2 не установлен"
         return 0
     fi
@@ -1031,18 +1131,7 @@ zapret2_remove() {
     local _yn; read -r _yn
     [[ "$_yn" =~ ^[yY]$ ]] || { log_info "Отменено"; return 0; }
 
-    zapret2_stop
-    systemctl disable "$ZAPRET2_SERVICE" 2>/dev/null || true
-    rm -f "/etc/systemd/system/${ZAPRET2_SERVICE}"
-    systemctl daemon-reload 2>/dev/null || true
-    rm -f "$ZAPRET2_CONF"
-    rm -f "$ZAPRET2_LUA"
-    rm -rf "$ZAPRET2_DIR"
-    rm -rf "$ZAPRET2_ETC_DIR"
-
-    ZAPRET2_APPLIED="false"
-    ZAPRET2_SERVICE_ENABLED="false"
-    save_settings
+    zapret2_purge
 
     log_success "Zapret2 MTProto fix полностью удалён"
 }
@@ -1399,7 +1488,7 @@ zapret2_install_auto() {
         zapret2_download_bundle || { log_error "Не удалось скачать zapret2"; return 1; }
     fi
 
-    if [ "${NFT_SERVICE_ENABLED:-false}" = "true" ] || nft list table inet "${NFT_TABLE:-telemt_limit}" &>/dev/null 2>&1; then
+    if [ "${NFT_SERVICE_ENABLED:-false}" = "true" ] || nft list table inet "${NFT_TABLE:-mtpr_synfix}" &>/dev/null 2>&1; then
         log_info "Отключаем SYN limiter..."
         remove_nft_rules 2>/dev/null || true
         remove_service 2>/dev/null || true

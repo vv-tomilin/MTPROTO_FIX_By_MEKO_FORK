@@ -3,8 +3,17 @@
 
 set -e
 
-BASE_URL="https://raw.githubusercontent.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/main"
 INSTALL_DIR="/opt/mtpr-simple"
+PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+
+if [ ! -r "$PROJECT_ROOT/data/dependencies.env" ] || [ ! -r "$PROJECT_ROOT/data/secure_fetch.sh" ]; then
+    echo "Запускайте install.sh из полного локального checkout или из /opt/mtpr-simple" >&2
+    exit 1
+fi
+# shellcheck disable=SC1091
+source "$PROJECT_ROOT/data/dependencies.env"
+# shellcheck disable=SC1091
+source "$PROJECT_ROOT/data/secure_fetch.sh"
 
 # ── Цвета ─────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -25,7 +34,7 @@ log_warning() { echo -e "  ${YELLOW}[!]${NC} $1"; }
 
 # ── Проверка root ────────────────────────────────────────────
 if [ "$(id -u)" -ne 0 ]; then
-    echo -e "${RED}[✗]${NC} Запустите от root: ${BOLD}curl -fsSL ... | sudo bash${NC}" >&2
+    echo -e "${RED}[✗]${NC} Запустите проверенную локальную копию: ${BOLD}sudo ./install.sh${NC}" >&2
     exit 1
 fi
 
@@ -33,16 +42,12 @@ fi
 download_file() {
     local file="$1"
     local dest="$2"
-    local url="$BASE_URL/$file"
+    local source_file="$PROJECT_ROOT/$file"
     
-    mkdir -p "$(dirname "$dest")"
-    
-    if curl -fsSL "$url" -o "$dest" 2>/dev/null; then
-        chmod +x "$dest" 2>/dev/null || true
-        return 0
-    else
+    if [ ! -f "$source_file" ] || [ -L "$source_file" ]; then
         return 1
     fi
+    install -D -o root -g root -m 0755 -- "$source_file" "$dest"
 }
 
 # ── Функция проверки и загрузки файла ────────────────────────
@@ -404,12 +409,7 @@ add_public_host_to_config() {
 
 # ── Функция получения последней версии Telemt ──────────────
 get_latest_telemt_version() {
-    local version=""
-    version=$(timeout 10 curl -fsS --max-time 5 "https://api.github.com/repos/telemt/telemt/releases/latest" 2>/dev/null | awk -F'"' '/"tag_name"/ {print $4}')
-    if [ -z "$version" ]; then
-        version="3.4.24"
-    fi
-    echo "$version"
+    echo "$TELEMT_LOCKED_VERSION"
 }
 
 # ── СТАРОЕ МЕНЮ (ПРОКСИ) ──────────────────────────────────────
@@ -539,7 +539,8 @@ show_main_menu() {
                 echo ""
                 log_info "Запуск установки mtproxyl..."
                 echo ""
-                wget -qO /tmp/mtproxyl-install.sh https://raw.githubusercontent.com/Liafanx/MTProxyL/main/install.sh && sudo bash /tmp/mtproxyl-install.sh && source ~/.bashrc
+                require_unverified_installer_opt_in "MTProxyL" || return 1
+                secure_run_github_script bash Liafanx/MTProxyL "$MTPROXYL_REF" install.sh
                 echo ""
                 log_success "Установка mtproxyl завершена"
                 echo ""
@@ -633,8 +634,9 @@ while [[ $# -gt 0 ]]; do
         -user)
             USER_NAME="$2"
             if [[ -n "$3" && ! "$3" =~ ^- ]]; then
-                USER_SECRET="$3"
-                shift 3
+                echo -e "${RED}[✗]${NC} Передача секрета в argv запрещена: он попадает в history и список процессов." >&2
+                echo "Используйте -user <имя>; секрет будет запрошен скрыто или сгенерирован." >&2
+                exit 1
             else
                 USER_SECRET=""
                 shift 2
@@ -647,36 +649,36 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             echo ""
             echo -e "  ${BOLD}Использование:${NC}"
-            echo -e "    curl ... | sudo bash -s -- [опции]"
+            echo -e "    sudo ./install.sh [опции]"
             echo ""
             echo -e "  ${BOLD}Опции:${NC}"
-            echo -e "    -telemt                установить Telemt"
-            echo -e "    -zig                   установить Mtproto.zig"
+            echo -e "    -telemt                upstream installer Telemt (по умолчанию заблокирован без checksums)"
+            echo -e "    -zig                   upstream installer Mtproto.zig (по умолчанию заблокирован без checksums)"
             echo -e "    -mtg                   установить MTG (пока не реализовано)"
             echo -e "    -fix                   установить фикс"
             echo -e "    -fix-type {v2|v3|v4|nft}   тип фикса (по умолчанию v3)"
             echo -e "    -fix-port <порт>       порт для фикса (если не указан, берётся из -port или спросится)"
             echo -e "    -port <порт>           порт для прокси (и для фикса, если не задан -fix-port)"
             echo -e "    -domain <домен>        SNI домен для прокси (по умолчанию ozon.ru)"
-            echo -e "    -version <версия>      версия Telemt (по умолчанию последняя)"
+            echo -e "    -version <версия>      версия Telemt (по умолчанию закреплённая в data/dependencies.env)"
             echo -e "    -ad_tag <тег>          добавить ad_tag в конфиг Telemt (в секцию [general])"
-            echo -e "    -user <имя> [секрет]   добавить пользователя в [access.users] (если секрет не указан — будет запрошен или сгенерирован)"
+            echo -e "    -user <имя>            добавить пользователя; секрет будет запрошен скрыто или сгенерирован"
             echo -e "    -public_host <домен>   добавить/обновить public_host в секции [server.links]"
             echo -e "    -no-fix                отключить установку фикса"
             echo -e "    -h, --help             показать эту справку"
             echo ""
             echo -e "  ${BOLD}Примеры:${NC}"
             echo -e "    # Только фикс V3 на порт 8443"
-            echo -e "    curl ... | sudo bash -s -- -fix -fix-port 8443"
+            echo -e "    sudo ./install.sh -fix -fix-port 8443"
             echo ""
             echo -e "    # Telemt + V3 фикс с ad_tag, пользователем и public_host"
-            echo -e "    curl ... | sudo bash -s -- -telemt -domain my.domain -port 9443 -fix -ad_tag 4c4140a4c40c5e2b080578a7e4e38c95 -user vasya -public_host my.domain"
+            echo -e "    sudo ./install.sh -telemt -domain my.domain -port 9443 -fix -ad_tag 4c4140a4c40c5e2b080578a7e4e38c95 -user vasya -public_host my.domain"
             echo ""
             echo -e "    # Telemt без фикса"
-            echo -e "    curl ... | sudo bash -s -- -telemt -no-fix"
+            echo -e "    sudo ./install.sh -telemt -no-fix"
             echo ""
             echo -e "    # V4 фикс (zapret2) на порт 443"
-            echo -e "    curl ... | sudo bash -s -- -fix -fix-type v4"
+            echo -e "    sudo ./install.sh -fix -fix-type v4"
             exit 0
             ;;
         *)
@@ -791,19 +793,54 @@ if [[ -n "$FLAG_TELEMT" || -n "$FLAG_ZIG" || -n "$FLAG_MTG" || -n "$FLAG_FIX" ]]
         fi
     fi
 
+    # Валидация всех значений до их подстановки в TOML/sed/команды.
+    if [ -n "$DOMAIN" ] && { [[ ! "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || [[ "$DOMAIN" == .* ]] || [[ "$DOMAIN" == *. ]]; }; then
+        log_error "Некорректный домен: $DOMAIN"
+        exit 1
+    fi
+    if [ -n "$TELEMT_VERSION" ] && [[ ! "$TELEMT_VERSION" =~ ^v?[0-9]+([.][0-9]+){1,3}([_-][A-Za-z0-9.-]+)?$ ]]; then
+        log_error "Некорректная версия Telemt"
+        exit 1
+    fi
+    if [ -n "$FLAG_TELEMT" ] && [ "$TELEMT_VERSION" != "$TELEMT_LOCKED_VERSION" ]; then
+        log_error "Разрешена только проверенная версия Telemt $TELEMT_LOCKED_VERSION"
+        exit 1
+    fi
+    if [ -n "$AD_TAG" ] && [[ ! "$AD_TAG" =~ ^[0-9A-Fa-f]{32}$ ]]; then
+        log_error "ad_tag должен содержать ровно 32 hex-символа"
+        exit 1
+    fi
+    if [ -n "$USER_NAME" ] && [[ ! "$USER_NAME" =~ ^[A-Za-z0-9_.-]{1,64}$ ]]; then
+        log_error "Некорректное имя пользователя"
+        exit 1
+    fi
+    if [ -n "$USER_SECRET" ] && [[ ! "$USER_SECRET" =~ ^[0-9A-Fa-f]{32}$ ]]; then
+        log_error "Секрет Telemt должен содержать ровно 32 hex-символа"
+        exit 1
+    fi
+    if [ -n "$PUBLIC_HOST" ] && [[ ! "$PUBLIC_HOST" =~ ^[A-Za-z0-9:._-]+$ ]]; then
+        log_error "Некорректный public_host"
+        exit 1
+    fi
+
     # ── 2. Подготовка окружения ──────────────────────────────
 
-    # Всегда скачиваем свежий rules.sh
-    mkdir -p "$INSTALL_DIR/data"
-    log_info "Загрузка свежего rules.sh..."
-    curl -fsSL "$BASE_URL/data/rules.sh" -o "$INSTALL_DIR/data/rules.sh"
-    chmod +x "$INSTALL_DIR/data/rules.sh"
+    # Устанавливаем проверенную локальную копию rules.sh.
+    install -d -m 0755 "$INSTALL_DIR/data"
+    if [ "$PROJECT_ROOT/data/dependencies.env" != "$INSTALL_DIR/data/dependencies.env" ]; then
+        install -o root -g root -m 0644 "$PROJECT_ROOT/data/dependencies.env" "$INSTALL_DIR/data/dependencies.env"
+    fi
+    log_info "Установка локального rules.sh..."
+    if [ "$PROJECT_ROOT/data/rules.sh" != "$INSTALL_DIR/data/rules.sh" ]; then
+        install -o root -g root -m 0755 "$PROJECT_ROOT/data/rules.sh" "$INSTALL_DIR/data/rules.sh"
+    fi
 
     # Если тип фикса v4, скачиваем zapret2_fix.sh
     if [[ "$FIX_TYPE" == "v4" ]]; then
-        log_info "Загрузка свежего zapret2_fix.sh..."
-        curl -fsSL "$BASE_URL/data/zapret2_fix.sh" -o "$INSTALL_DIR/data/zapret2_fix.sh"
-        chmod +x "$INSTALL_DIR/data/zapret2_fix.sh"
+        log_info "Установка локального zapret2_fix.sh..."
+        if [ "$PROJECT_ROOT/data/zapret2_fix.sh" != "$INSTALL_DIR/data/zapret2_fix.sh" ]; then
+            install -o root -g root -m 0755 "$PROJECT_ROOT/data/zapret2_fix.sh" "$INSTALL_DIR/data/zapret2_fix.sh"
+        fi
     fi
 
     # Подключаем rules.sh
@@ -823,9 +860,10 @@ if [[ -n "$FLAG_TELEMT" || -n "$FLAG_ZIG" || -n "$FLAG_MTG" || -n "$FLAG_FIX" ]]
 
     # Telemt
     if [[ -n "$FLAG_TELEMT" ]]; then
+        require_unverified_installer_opt_in "Telemt standard" || exit 1
         echo "" >&2
         log_info "Установка Telemt версии $TELEMT_VERSION на домен $DOMAIN, порт $PROXY_PORT..."
-        curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh -s -- "$TELEMT_VERSION" -l 2 -d "$DOMAIN" -p "$PROXY_PORT"
+        secure_run_github_script sh telemt/telemt "$TELEMT_REF" install.sh "$TELEMT_VERSION" -l 2 -d "$DOMAIN" -p "$PROXY_PORT"
         log_success "Telemt установлен"
         
         # Добавляем ad_tag, если передан
@@ -838,13 +876,14 @@ if [[ -n "$FLAG_TELEMT" || -n "$FLAG_ZIG" || -n "$FLAG_MTG" || -n "$FLAG_FIX" ]]
             if [ -z "$USER_SECRET" ]; then
                 echo -en "  ${BOLD}Введите секрет для пользователя $USER_NAME (Enter - сгенерировать автоматически)${NC}: " >&2
                 if [ -r /dev/tty ]; then
-                    read -r input_secret </dev/tty
+                    read -rs input_secret </dev/tty
+                    echo "" >&2
                 else
                     input_secret=""
                 fi
                 if [ -z "$input_secret" ]; then
                     USER_SECRET=$(generate_secret)
-                    log_info "Сгенерирован секрет: $USER_SECRET"
+                    log_info "Сгенерирован новый секрет пользователя"
                 else
                     USER_SECRET="$input_secret"
                 fi
@@ -879,9 +918,10 @@ if [[ -n "$FLAG_TELEMT" || -n "$FLAG_ZIG" || -n "$FLAG_MTG" || -n "$FLAG_FIX" ]]
 
     # Zig
     if [[ -n "$FLAG_ZIG" ]]; then
+        require_unverified_installer_opt_in "mtproto.zig" || exit 1
         echo "" >&2
         log_info "Установка Mtproto.zig на домен $DOMAIN, порт $PROXY_PORT..."
-        curl -fsSL https://raw.githubusercontent.com/sleep3r/mtproto.zig/main/deploy/bootstrap.sh | sudo bash
+        secure_run_github_script bash sleep3r/mtproto.zig "$MTPROTO_ZIG_REF" deploy/bootstrap.sh
         sudo mtbuddy install --port "$PROXY_PORT" --domain "$DOMAIN" --middle-proxy --no-tcpmss --no-masking --no-nfqws --no-dpi --yes
         log_success "Mtproto.zig установлен"
     fi

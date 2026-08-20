@@ -1,13 +1,14 @@
+> [!IMPORTANT]
+> This is an unofficial security-hardening fork of [MTPROTO_FIX_By_MEKO](https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO), not an official MEKO release. See [NOTICE.md](NOTICE.md) and [LICENSE](LICENSE).
+
 <div align="center">
 
-# MEKO | VPN and MTProto proxy manager - Installer, Launcher and fixer
+# Unofficial MTProto Proxy Security Hardening Fork
 
-<a href="https://t.me/meko_mtprotofix">
-<img width="300" height="300" alt="logo" src="https://github.com/user-attachments/assets/8decca32-f96a-4b00-9e6c-1bf16bf94d33" />
+Original project and attribution are recorded in `NOTICE.md`.
 
 ---
-[![Latest Release](https://img.shields.io/github/v/release/Mekotofeuka/MTPROTO_FIX_By_MEKO?color=neon)](https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/releases/latest) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Stars](https://img.shields.io/github/stars/Mekotofeuka/MTPROTO_FIX_By_MEKO?style=social)](https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/stargazers) [![Forks](https://img.shields.io/github/forks/Mekotofeuka/MTPROTO_FIX_By_MEKO?style=social)](https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/network/members) [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/pulls)
-[![Telegram](https://telegram-badge.vercel.app/api/telegram-badge?channelId=@meko_mtprotofix)](https://t.me/meko_mtprotofix)
+[![License: MEKO Public License v3](https://img.shields.io/badge/license-MEKO_Public_License_v3-blue.svg)](LICENSE) [![Upstream](https://img.shields.io/badge/upstream-MTPROTO__FIX__By__MEKO-informational.svg)](https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO)
 
 </div>
 
@@ -79,8 +80,16 @@ This script is for servers with MTProto proxies; it fixes slow initial TCP clien
 
 **Attention, this script is paid; price: 1 ⭐ on the repository**
 
-1. **Install/update our script**:
-<pre><code>curl -fsSL https://raw.githubusercontent.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/main/install.sh | sudo bash</code></pre>
+1. **Install/update from a reviewed local checkout**:
+<pre><code>read -rp "Your hardening repository URL: " HARDENED_REPO_URL
+git clone -- "$HARDENED_REPO_URL" hardened-mtproto-proxy
+cd hardened-mtproto-proxy
+read -rp "Reviewed 40-character release SHA: " AUDITED_COMMIT
+[[ "$AUDITED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || exit 1
+git checkout --detach "$AUDITED_COMMIT"
+sudo ./install_main.sh</code></pre>
+
+Do not pipe a mutable branch into a root shell. See `DEPLOYMENT_VPS.md` for the hardened deployment procedure.
 2. **Install standard Telemt**, or "**MTPROTO.zig**" or **MTG**
    > (all proxies can be installed via our script menu; you don't need to install them beforehand on the server, and order doesn't matter – proxy first or fix first)
 4. Apply the fix to your proxy by pressing **[1] Install SYN FIX** in the main menu

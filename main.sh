@@ -35,6 +35,20 @@ check_root() {
 }
 check_root
 
+if [ -r /opt/mtpr-simple/data/dependencies.env ]; then
+    MEKOPR_ROOT=/opt/mtpr-simple
+else
+    MEKOPR_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+fi
+if [ ! -r "$MEKOPR_ROOT/data/dependencies.env" ] || [ ! -r "$MEKOPR_ROOT/data/secure_fetch.sh" ]; then
+    log_error "Не найдены зафиксированные зависимости; переустановите проект из локального checkout"
+    exit 1
+fi
+# shellcheck disable=SC1091
+source "$MEKOPR_ROOT/data/dependencies.env"
+# shellcheck disable=SC1091
+source "$MEKOPR_ROOT/data/secure_fetch.sh"
+
 # ── Функция проверки и загрузки rules.sh ────────────────────
 RULES_SCRIPT="/opt/mtpr-simple/data/rules.sh"
 RULES_LOADED=0
@@ -52,26 +66,9 @@ ensure_rules_loaded() {
         return 0
     fi
 
-    log_warning "Файл $RULES_SCRIPT не найден, скачиваю с GitHub..."
-    mkdir -p /opt/mtpr-simple/data
-    if curl -fsSL --max-time 5 "https://raw.githubusercontent.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/main/data/rules.sh" -o "$RULES_SCRIPT"; then
-        chmod +x "$RULES_SCRIPT"
-        source "$RULES_SCRIPT"
-        RULES_LOADED=1
-        if curl -fsSL --max-time 5 "https://raw.githubusercontent.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/main/data/zapret2_fix.sh" -o /opt/mtpr-simple/data/zapret2_fix.sh; then
-            chmod +x /opt/mtpr-simple/data/zapret2_fix.sh
-            source /opt/mtpr-simple/data/zapret2_fix.sh
-            zapret2_load_settings 2>/dev/null || true
-        fi
-        log_success "rules.sh успешно загружен"
-        return 0
-    else
-        log_error "Не удалось скачать rules.sh (проверьте подключение к GitHub)"
-        echo -e "  ${YELLOW}Вы можете вручную поместить файл rules.sh по пути:${NC}"
-        echo -e "  ${BOLD}${RULES_SCRIPT}${NC}"
-        echo -e "  ${YELLOW}После этого повторите попытку.${NC}"
-        return 1
-    fi
+    log_error "Файл $RULES_SCRIPT отсутствует. Автозагрузка из ветки main отключена."
+    log_info "Переустановите проверенный локальный checkout командой sudo ./install_main.sh"
+    return 1
 }
 
 # ── ОСТАЛЬНЫЕ ПЕРЕМЕННЫЕ И ФУНКЦИИ (НЕ ИЗ RULES.SH) ──────────
@@ -418,19 +415,19 @@ apply_basic_optimization() {
         log_info "Создан /etc/sysctl.conf"
     fi
 
-    mkdir -p /etc/systemd/system/telemt.service.d
+    install -d -m 0755 /etc/systemd/system/telemt.service.d
 
-    if ! grep -q "LimitNOFILE=65535" /etc/systemd/system/telemt.service.d/limits.conf 2>/dev/null; then
-        cat >/etc/systemd/system/telemt.service.d/limits.conf <<EOF
+    cat >/etc/systemd/system/telemt.service.d/90-mekopr-limits.conf <<EOF
 [Service]
 LimitNOFILE=65535
 EOF
-    fi
+    chmod 0644 /etc/systemd/system/telemt.service.d/90-mekopr-limits.conf
 
     systemctl daemon-reload
 
     apply_sysctl() {
-        cat >/etc/sysctl.d/99-custom.conf <<EOF
+        cat >/etc/sysctl.d/90-mekopr.conf <<EOF
+# Managed by MTPROTO_FIX_By_MEKO. Removed by the project uninstaller.
 net.ipv4.tcp_fastopen=3
 net.core.somaxconn=65535
 net.ipv4.tcp_max_syn_backlog=65535
@@ -442,6 +439,7 @@ net.ipv4.tcp_keepalive_time=45
 net.ipv4.tcp_keepalive_intvl=15
 net.ipv4.tcp_keepalive_probes=3
 EOF
+        chmod 0644 /etc/sysctl.d/90-mekopr.conf
 
         sysctl --system 2>/dev/null || log_info "sysctl --system выполнен без изменений"
     }
@@ -480,8 +478,39 @@ remove_mekopr() {
         log_warning "rules.sh не загружен, пропускаем удаление правил"
     fi
 
+    if [ -f /opt/mtpr-simple/data/zapret2_fix.sh ]; then
+        # shellcheck disable=SC1091
+        source /opt/mtpr-simple/data/zapret2_fix.sh
+        if declare -F zapret2_purge >/dev/null 2>&1; then
+            zapret2_purge
+        fi
+    fi
+
+    # Fallback для установок старых версий, где zapret2_purge отсутствовал.
+    systemctl stop mtpr-zapret2.service mtpr-zapret2-watch.service 2>/dev/null || true
+    systemctl disable mtpr-zapret2.service mtpr-zapret2-watch.service 2>/dev/null || true
+    nft delete table ip MTProto 2>/dev/null || true
+    rm -f /etc/systemd/system/mtpr-zapret2.service
+    rm -f /etc/systemd/system/mtpr-zapret2-watch.service
+    rm -f /usr/local/sbin/mtpr-zapret2-start.sh
+    rm -f /usr/local/sbin/mtpr-zapret2-watch.sh
+    rm -rf /opt/zapret2 /etc/zapret2
+
+    rm -f /etc/systemd/system/telemt.service.d/90-mekopr-limits.conf
+    rm -f /etc/sysctl.d/90-mekopr.conf
+    systemctl daemon-reload 2>/dev/null || true
+    sysctl --system >/dev/null 2>&1 || true
+
     log_info "Удаление файлов конфигурации..."
     rm -rf /opt/mtpr-simple
+    rm -f /usr/local/bin/mekopr /usr/local/bin/mekomanager
+    local old_backup
+    for old_backup in /opt/mtpr-simple.backup.*; do
+        [ -d "$old_backup" ] || continue
+        case "$old_backup" in
+            /opt/mtpr-simple.backup.*) rm -rf -- "$old_backup" ;;
+        esac
+    done
 
     log_success "MEKOpr полностью удалён с сервера!"
     echo ""
@@ -833,7 +862,7 @@ check_censor() {
     echo ""
     log_info "Проверка ограничений на сервере..."
     echo ""
-    wget -qO- https://raw.githubusercontent.com/Nokola-Tesla/censorcheck/main/censorcheck.sh | bash
+    secure_run_github_script bash Nokola-Tesla/censorcheck "$CENSORCHECK_REF" censorcheck.sh
     echo ""
     echo -e "  ${GRAY}Нажмите любую клавишу для возврата в меню...${NC}"
     read -rsn1
@@ -1017,7 +1046,13 @@ main_menu() {
 
 # ── Обновление скрипта ──────────────────────────────────────────
 update_script() {
-    local BASE_URL="https://raw.githubusercontent.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/main"
+    log_warning "Сетевое самообновление отключено: оно выполняло изменяемый код от root."
+    log_info "Обновите отдельный git checkout, проверьте diff/commit и выполните sudo ./install_main.sh"
+    echo -e "  ${GRAY}Нажмите любую клавишу для возврата в меню...${NC}"
+    read -rsn1
+    return 1
+
+    local BASE_URL="disabled://local-checkout-required"
     local MANIFEST_URL="$BASE_URL/data/manifest.txt"
     local MANIFEST_FILE="/tmp/manifest_update.txt"
     local INSTALL_DIR="/opt/mtpr-simple"
@@ -1165,7 +1200,17 @@ update_script() {
 
 # ── Установка/обновление Node Manager ──────────────────────────
 install_node_manager() {
-    local BASE_URL="https://raw.githubusercontent.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/main"
+    local LOCAL_MANAGER_DIR="/opt/mtpr-simple/remote_ctl"
+    local LOCAL_MANAGER_SCRIPT="$LOCAL_MANAGER_DIR/node_manager.sh"
+    if [ ! -x "$LOCAL_MANAGER_SCRIPT" ] || [ ! -r "$LOCAL_MANAGER_DIR/rules1_node.sh" ] || [ ! -r "$LOCAL_MANAGER_DIR/telemt1_node.sh" ]; then
+        log_error "Файлы Node Manager отсутствуют. Переустановите проект из локального checkout."
+        return 1
+    fi
+    ln -sfn "$LOCAL_MANAGER_SCRIPT" /usr/local/bin/mekomanager
+    log_success "Команда mekomanager создана из проверенной локальной копии"
+    exec "$LOCAL_MANAGER_SCRIPT" </dev/tty
+
+    local BASE_URL="disabled://local-checkout-required"
     local MANIFEST_URL="$BASE_URL/remote_ctl/manifest.txt"
     local MANIFEST_FILE="/tmp/node_manager_manifest.txt"
     local INSTALL_DIR="/opt/mtpr-simple/remote_ctl"

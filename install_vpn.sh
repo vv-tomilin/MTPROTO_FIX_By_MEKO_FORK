@@ -1,9 +1,18 @@
 #!/bin/bash
+
+MEKOPR_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+if [ ! -r "$MEKOPR_ROOT/data/dependencies.env" ] || [ ! -r "$MEKOPR_ROOT/data/secure_fetch.sh" ]; then
+    echo "Не найдены зафиксированные зависимости MEKOpr" >&2
+    return 1 2>/dev/null || exit 1
+fi
+# shellcheck disable=SC1091
+source "$MEKOPR_ROOT/data/dependencies.env"
+# shellcheck disable=SC1091
+source "$MEKOPR_ROOT/data/secure_fetch.sh"
 # install_vpn.sh – Меню установки VPN (3x-ui / Remnawave)
 
 set -e
 
-BASE_URL="https://raw.githubusercontent.com/Mekotofeuka/MTPROTO_FIX_By_MEKO/main"
 INSTALL_DIR="/opt/mtpr-simple"
 
 # ── Цвета ─────────────────────────────────────────────────────
@@ -33,15 +42,13 @@ fi
 download_file() {
     local file="$1"
     local dest="$2"
-    local url="$BASE_URL/$file"
+    local source_file="$MEKOPR_ROOT/$file"
     
-    mkdir -p "$(dirname "$dest")"
-    
-    if curl -fsSL "$url" -o "$dest" 2>/dev/null; then
-        chmod +x "$dest" 2>/dev/null || true
-        return 0
-    else
+    if [ ! -f "$source_file" ] || [ -L "$source_file" ]; then
         return 1
+    fi
+    if [ "$source_file" != "$dest" ]; then
+        install -D -o root -g root -m 0755 -- "$source_file" "$dest"
     fi
 }
 
@@ -94,7 +101,8 @@ install_remnawave() {
     echo ""
 
     # Заменяем текущий процесс на выполнение команды с терминальным вводом
-    exec sudo bash -c "$(curl -sL https://raw.githubusercontent.com/xxphantom/remnawave-installer/main/install.sh)" @ --lang=ru </dev/tty
+    require_unverified_installer_opt_in "Remnawave" || return 1
+    secure_run_github_script bash xxphantom/remnawave-installer "$REMNAWAVE_REF" install.sh --lang=ru </dev/tty
 }
 
 # ── Очистка экрана и шапка ────────────────────────────────────

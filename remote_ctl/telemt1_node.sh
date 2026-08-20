@@ -1,4 +1,18 @@
 #!/bin/bash
+
+if [ -r /opt/mtpr-simple/data/dependencies.env ]; then
+    MEKOPR_ROOT=/opt/mtpr-simple
+else
+    MEKOPR_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+fi
+if [ ! -r "$MEKOPR_ROOT/data/dependencies.env" ] || [ ! -r "$MEKOPR_ROOT/data/secure_fetch.sh" ]; then
+    echo "Не найден lock-файл зависимостей MEKOpr" >&2
+    return 1 2>/dev/null || exit 1
+fi
+# shellcheck disable=SC1091
+source "$MEKOPR_ROOT/data/dependencies.env"
+# shellcheck disable=SC1091
+source "$MEKOPR_ROOT/data/secure_fetch.sh"
 # telemt1_node.sh – удалённое управление Telemt через SSH
 # Использование: ./telemt1_node.sh <IP> <USER> <PORT>
 
@@ -13,10 +27,44 @@ REMOTE_PORT="$3"
 
 # ── Функция выполнения команд через SSH ─────────────────────
 ssh_exec() {
-    ssh -p "$REMOTE_PORT" -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$REMOTE_USER@$REMOTE_IP" "$1" 2>/dev/null
+    ssh -p "$REMOTE_PORT" -o StrictHostKeyChecking=yes -o ConnectTimeout=5 "$REMOTE_USER@$REMOTE_IP" "$1" 2>/dev/null
 }
 ssh_interactive() {
-    ssh -t -p "$REMOTE_PORT" -o StrictHostKeyChecking=no "$REMOTE_USER@$REMOTE_IP" "$1"
+    ssh -t -p "$REMOTE_PORT" -o StrictHostKeyChecking=yes "$REMOTE_USER@$REMOTE_IP" "$1"
+}
+
+stage_telemt_installer() {
+    local local_tmp remote_tmp
+    local_tmp=$(mktemp) || return 1
+    if ! secure_fetch_github_script telemt/telemt "$TELEMT_REF" install.sh "$local_tmp"; then
+        rm -f -- "$local_tmp"
+        return 1
+    fi
+    remote_tmp=$(ssh_exec "mktemp /tmp/mekopr-telemt-install.XXXXXX") || {
+        rm -f -- "$local_tmp"
+        return 1
+    }
+    case "$remote_tmp" in
+        /tmp/mekopr-telemt-install.*) ;;
+        *) rm -f -- "$local_tmp"; return 1 ;;
+    esac
+    if ! scp -q -P "$REMOTE_PORT" -o StrictHostKeyChecking=yes -- "$local_tmp" "$REMOTE_USER@$REMOTE_IP:$remote_tmp"; then
+        rm -f -- "$local_tmp"
+        ssh_exec "rm -f -- '$remote_tmp'" || true
+        return 1
+    fi
+    rm -f -- "$local_tmp"
+    printf '%s' "$remote_tmp"
+}
+
+run_telemt_installer() {
+    local remote_tmp argument="${1:-}"
+    remote_tmp=$(stage_telemt_installer) || return 1
+    if [ -n "$argument" ]; then
+        ssh_interactive "sh '$remote_tmp' '$argument'; rc=\$?; rm -f -- '$remote_tmp'; exit \$rc"
+    else
+        ssh_interactive "sh '$remote_tmp'; rc=\$?; rm -f -- '$remote_tmp'; exit \$rc"
+    fi
 }
 
 # ── Цвета ─────────────────────────────────────────────────────
@@ -546,16 +594,16 @@ install_telemt() {
         return 0
     fi
 
-    local install_version="latest"
-    local display_version="последнюю"
+    local install_version="$TELEMT_LOCKED_VERSION"
+    local display_version="$TELEMT_LOCKED_VERSION"
     
     if [ -n "$version_input" ]; then
-        if [[ "$version_input" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        if [ "$version_input" = "$TELEMT_LOCKED_VERSION" ]; then
             install_version="$version_input"
             display_version="$version_input"
         else
             echo ""
-            echo -e "  ${YELLOW}[!]${NC} Некорректный формат версии. Используйте формат X.Y.Z"
+            echo -e "  ${YELLOW}[!]${NC} Разрешена только проверенная версия $TELEMT_LOCKED_VERSION"
             echo -e "  ${GRAY}Нажмите любую клавишу для возврата в меню...${NC}"
             read -rsn1
             return 1
@@ -566,11 +614,8 @@ install_telemt() {
     echo -e "  ${BLUE}[i]${NC} Установка Telemt версии ${display_version}..."
     echo ""
 
-    if [ "$install_version" = "latest" ]; then
-        ssh_interactive "curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh"
-    else
-        ssh_interactive "curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh -s -- $install_version"
-    fi
+    require_unverified_installer_opt_in "Telemt standard" || return 1
+    run_telemt_installer "$install_version"
     
     echo ""
     echo -e "  ${GRAY}Нажмите любую клавишу для возврата в меню...${NC}"
@@ -611,7 +656,7 @@ purge_telemt() {
     echo ""
     echo -e "  ${BLUE}[i]${NC} Удаление Telemt..."
     echo ""
-    ssh_interactive "curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh -s -- purge"
+    run_telemt_installer purge
     echo ""
     echo -e "  ${GRAY}Нажмите любую клавишу для возврата в меню...${NC}"
     read -rsn1

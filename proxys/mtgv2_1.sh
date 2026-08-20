@@ -1,4 +1,12 @@
 #!/bin/bash
+
+MEKOPR_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+if [ ! -r "$MEKOPR_ROOT/data/dependencies.env" ]; then
+    echo "Не найден lock-файл зависимостей MEKOpr" >&2
+    return 1 2>/dev/null || exit 1
+fi
+# shellcheck disable=SC1091
+source "$MEKOPR_ROOT/data/dependencies.env"
 # mtgv2_1.sh – управление MTG (MTProto Go proxy)
 
 # ── Цвета ─────────────────────────────────────────────────────
@@ -121,32 +129,52 @@ install_mtg_binary() {
             ;;
     esac
 
-    # Скачиваем последнюю версию
-    local tmp_dir=$(mktemp -d)
+    # Скачиваем закреплённую версию во временный каталог с закрытыми правами.
+    local tmp_dir
+    tmp_dir=$(mktemp -d /tmp/mekopr-mtg.XXXXXX) || return 1
+    chmod 0700 "$tmp_dir"
     cd "$tmp_dir"
 
     echo -e "  ${BLUE}[i]${NC} Загрузка MTG для архитектуры ${mtg_arch}..."
     
-    # Получаем URL последней версии
-    local download_url
-    download_url=$(curl -s https://api.github.com/repos/9seconds/mtg/releases/latest | grep -o "https://.*mtg-.*-linux-${mtg_arch}.*\.tar\.gz" | head -1)
-    
-    if [ -z "$download_url" ]; then
-        echo -e "  ${RED}[✗] Не удалось найти последнюю версию MTG${NC}"
-        cd / && rm -rf "$tmp_dir"
-        return 1
-    fi
+    local asset_name="mtg-${MTG_VERSION}-linux-${mtg_arch}.tar.gz"
+    local release_base="https://github.com/9seconds/mtg/releases/download/v${MTG_VERSION}"
+    local download_url="${release_base}/${asset_name}"
 
     echo -e "  ${BLUE}[i]${NC} Скачивание: ${download_url##*/}"
     
-    if ! curl -fsSL --max-time 60 "$download_url" -o mtg.tar.gz; then
+    if ! curl --proto '=https' --tlsv1.2 -fsSL --max-time 120 "$download_url" -o "$asset_name"; then
         echo -e "  ${RED}[✗] Ошибка скачивания MTG${NC}"
         cd / && rm -rf "$tmp_dir"
         return 1
     fi
 
+    if ! curl --proto '=https' --tlsv1.2 -fsSL --max-time 30 \
+        "${release_base}/mtg-${MTG_VERSION}-checksums.txt" -o checksums.txt; then
+        echo -e "  ${RED}[✗] Не удалось загрузить checksums MTG${NC}"
+        cd / && rm -rf "$tmp_dir"
+        return 1
+    fi
+    if ! printf '%s  %s\n' "$MTG_CHECKSUMS_SHA256" checksums.txt | sha256sum -c - >/dev/null 2>&1; then
+        echo -e "  ${RED}[✗] Контрольная сумма списка MTG не совпала${NC}"
+        cd / && rm -rf "$tmp_dir"
+        return 1
+    fi
+    local asset_sha
+    asset_sha=$(awk -v name="$asset_name" '$2 == name || $2 == "*" name { print $1; exit }' checksums.txt)
+    if [[ ! "$asset_sha" =~ ^[0-9a-fA-F]{64}$ ]] || ! printf '%s  %s\n' "$asset_sha" "$asset_name" | sha256sum -c - >/dev/null 2>&1; then
+        echo -e "  ${RED}[✗] Контрольная сумма архива MTG не совпала${NC}"
+        cd / && rm -rf "$tmp_dir"
+        return 1
+    fi
+
     # Распаковываем
-    tar -xzf mtg.tar.gz
+    if tar -tzf "$asset_name" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
+        echo -e "  ${RED}[✗] Архив MTG содержит небезопасные пути${NC}"
+        cd / && rm -rf "$tmp_dir"
+        return 1
+    fi
+    tar -xzf "$asset_name"
     local mtg_bin
     mtg_bin=$(find . -type f -name "mtg" ! -path "*/.*" 2>/dev/null | head -1)
     
@@ -157,8 +185,7 @@ install_mtg_binary() {
     fi
 
     # Устанавливаем
-    mv "$mtg_bin" /usr/local/bin/mtg
-    chmod +x /usr/local/bin/mtg
+    install -o root -g root -m 0755 "$mtg_bin" /usr/local/bin/mtg
 
     cd / && rm -rf "$tmp_dir"
 
@@ -182,9 +209,6 @@ purge_mtg_silent() {
     rm -f /usr/local/bin/mtg
     rm -f /etc/mtg.toml
     rm -f "$CONFIG_PATH_FILE"
-    rm -f mtg-latest.tar.gz 2>/dev/null || true
-    rm -f mtg-*.tar.gz 2>/dev/null || true
-    rm -rf mtg-*/ 2>/dev/null || true
 }
 
 # ── Функция проверки MTG (doctor) ────────────────────────────
@@ -436,6 +460,7 @@ install_mtg() {
     # Создание конфига
     echo ""
     echo -e "  ${BLUE}[i]${NC} Создание конфига /etc/mtg.toml..."
+    umask 077
     cat > /etc/mtg.toml << EOF
 secret = "${SECRET}"
 bind-to = "0.0.0.0:${port}"
@@ -458,6 +483,14 @@ count = 3
 EOF
         echo -e "  ${GREEN}✓${NC} Настройки keep-alive добавлены (idle=10s, interval=10s, count=3)."
     fi
+    if ! getent group mtg >/dev/null 2>&1; then
+        groupadd --system mtg
+    fi
+    if ! id -u mtg >/dev/null 2>&1; then
+        useradd --system --gid mtg --no-create-home --shell /usr/sbin/nologin mtg
+    fi
+    chown root:mtg /etc/mtg.toml
+    chmod 0640 /etc/mtg.toml
 
     # Сохраняем путь к конфигу
     mkdir -p /opt/mtpr-simple
@@ -476,10 +509,24 @@ After=network.target
 
 [Service]
 Type=simple
+User=mtg
+Group=mtg
 ExecStart=/usr/local/bin/mtg run /etc/mtg.toml
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target
@@ -652,7 +699,7 @@ show_link() {
     fi
     
     local ip
-    ip=$(curl -4 -fsS --max-time 3 ifconfig.me 2>/dev/null || curl -4 -fsS --max-time 3 icanhazip.com 2>/dev/null || echo "SERVER_IP")
+    ip=$(curl -4 -fsS --max-time 3 https://api.ipify.org 2>/dev/null || echo "SERVER_IP")
     
     local port
     port=$(get_mtg_port "/etc/mtg.toml")
