@@ -125,31 +125,45 @@ sudo ./install_main.sh
 sudo mekopr
 ```
 
-## 6. Docker-вариант Telemt
+## 6. Простая установка Telemt
 
-Сначала установите Docker Engine из официального репозитория Docker для вашей ОС. Не используйте `get.docker.com | sh`. Инструкция: <https://docs.docker.com/engine/install/>.
-
-Docker предупреждает, что опубликованные порты контейнеров могут обходить UFW, а
-пользовательские правила для Docker следует размещать в цепочке `DOCKER-USER`.
-Поэтому варианты SYN FIX на чистом `nftables` предназначены только для нативного
-proxy-процесса. Для Docker сначала установите и запустите Docker, затем Telemt,
-после чего используйте hardening-вариант `iptables`: он подключает проектную
-цепочку одновременно к `INPUT` и `DOCKER-USER`. Если `xt_u32` недоступен,
-используйте вариант `iptables` без u32.
-
-Проверьте установку:
+После установки Manager выполните:
 
 ```bash
-docker --version
-docker compose version
-sudo systemctl enable --now docker
+sudo mekopr
 ```
 
-Запустите:
+В меню выберите:
 
-```bash
-sudo /opt/mtpr-simple/proxys/telemt_in_docker1.sh
+```text
+[3] УСТАНОВИТЬ ПРОКСИ
+[1] Меню Telemt
+[1] Установить Telemt нативно
 ```
+
+или в последнем меню:
+
+```text
+[2] Установить Telemt в Docker
+```
+
+Нативный вариант автоматически:
+
+- скачивает закреплённый release-архив Telemt;
+- проверяет SHA-256 для архитектуры и libc;
+- создаёт системного пользователя, конфигурацию и systemd-службу;
+- запускает Telemt и проверяет, что proxy-порт слушается;
+- устанавливает nftables SYN FIX для `INPUT`;
+- выводит ссылку только после прохождения всех проверок.
+
+Docker-вариант при необходимости сам устанавливает Docker Engine и Compose из
+официального APT-репозитория с проверкой fingerprint ключа. Затем он запускает
+образ Telemt по OCI digest, проверяет контейнер и опубликованный порт и
+подключает iptables SYN FIX к `DOCKER-USER`.
+
+Если обязательный этап завершается ошибкой, установщик выводит
+`TELEMT НЕ УСТАНОВЛЕН`, останавливает proxy и не показывает ложный зелёный итог.
+Отдельно устанавливать SYN FIX до установки прокси больше не нужно.
 
 Безопасные свойства создаваемой конфигурации:
 
@@ -162,11 +176,29 @@ sudo /opt/mtpr-simple/proxys/telemt_in_docker1.sh
 - контейнер использует `cap_drop: ALL` и `no-new-privileges`.
 - root filesystem контейнера работает в режиме `read_only`, временные файлы — в отдельном `tmpfs`.
 
-Стандартные installer-скрипты Telemt, mtproto.zig, 3x-ui, Remnawave, MTProxyL и Telemt Panel закреплены по commit SHA, но их вложенные release-артефакты не имеют закреплённых в этом проекте checksums. Поэтому они заблокированы по умолчанию. Переменная `MEKOPR_ALLOW_UNVERIFIED_INSTALLERS=1` существует только как осознанный аварийный opt-in и не рекомендуется для production. Для Telemt используйте описанный выше Docker-образ по digest; для MTG — проверяемый установщик из раздела 9.
+Меню Telemt больше не запускает upstream installer: нативный архив проверяется по
+закреплённому SHA-256, а Docker-образ — по OCI digest. Upstream installer-скрипты
+mtproto.zig, 3x-ui, Remnawave, MTProxyL и Telemt Panel всё ещё могут загружать
+вложенные release-артефакты без закреплённых checksums и потому заблокированы по
+умолчанию. Переменная `MEKOPR_ALLOW_UNVERIFIED_INSTALLERS=1` существует только
+как осознанный аварийный opt-in и не рекомендуется для production.
 
 ## 7. Проверка после запуска
 
-### Контейнер и образ
+Установщик уже выполняет обязательные проверки. Для повторной ручной проверки
+нативного варианта:
+
+```bash
+sudo systemctl is-active telemt.service
+sudo systemctl is-active mtpr-nft-synfix.service
+sudo ss -lntp
+sudo nft list table inet mtpr_synfix
+```
+
+Ожидаются два значения `active`, слушающий proxy-порт и таблица
+`inet mtpr_synfix`.
+
+### Контейнер и образ (только Docker-вариант)
 
 ```bash
 cd /root/telemt
@@ -211,7 +243,9 @@ sudo stat -c '%U:%G %a %n' /root/telemt/config.toml /root/telemt/docker-compose.
 sudo nft list ruleset
 command -v iptables-save >/dev/null && sudo iptables-save
 command -v ip6tables-save >/dev/null && sudo ip6tables-save
-sudo iptables -S DOCKER-USER | grep MTPR_SYNFIX
+if sudo docker inspect telemt >/dev/null 2>&1; then
+    sudo iptables -S DOCKER-USER | grep MTPR_SYNFIX
+fi
 ```
 
 Для Docker последняя команда должна показать переход в `MTPR_SYNFIX`. Одного

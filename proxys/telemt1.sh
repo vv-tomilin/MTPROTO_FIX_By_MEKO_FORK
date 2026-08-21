@@ -94,7 +94,7 @@ detect_telemt_advanced() {
     # 2. Поиск конфига в стандартных местах
     if [ -z "$DETECTED_CONFIG_PATH" ]; then
         local _cf
-        for _cf in /etc/telemt/telemt.toml /etc/telemt/config.toml /etc/telemt.toml /opt/telemt/config.toml /opt/telemt/telemt.toml; do
+        for _cf in /etc/telemt/telemt.toml /root/telemt/config.toml /etc/telemt/config.toml /etc/telemt.toml /opt/telemt/config.toml /opt/telemt/telemt.toml; do
             if [ -f "$_cf" ] && ! _is_excluded_path "$_cf" && _looks_like_telemt_config "$_cf"; then
                 DETECTED_CONFIG_PATH="$_cf"
                 break
@@ -448,13 +448,11 @@ find_user_link() {
 
 # ── Функция проверки, установлен ли Telemt ──────────────────
 is_telemt_installed() {
-    if command -v telemt >/dev/null 2>&1; then
+    if command -v telemt >/dev/null 2>&1 && systemctl is-active --quiet telemt.service 2>/dev/null; then
         return 0
     fi
-    if systemctl is-active --quiet telemt 2>/dev/null; then
-        return 0
-    fi
-    if pgrep -x telemt >/dev/null 2>&1; then
+    if command -v docker >/dev/null 2>&1 && \
+       [ "$(docker inspect -f '{{.State.Running}}' telemt 2>/dev/null || true)" = "true" ]; then
         return 0
     fi
     return 1
@@ -462,8 +460,10 @@ is_telemt_installed() {
 
 # ── Функция получения версии Telemt ─────────────────────────
 get_telemt_version() {
-    if command -v telemt >/dev/null 2>&1; then
+    if command -v telemt >/dev/null 2>&1 && systemctl is-active --quiet telemt.service 2>/dev/null; then
         telemt --version 2>/dev/null | head -1 | awk '{print $2}'
+    elif command -v docker >/dev/null 2>&1 && docker inspect telemt >/dev/null 2>&1; then
+        echo "$TELEMT_LOCKED_VERSION"
     else
         echo ""
     fi
@@ -534,7 +534,11 @@ view_logs() {
     echo ""
     echo -e "  ${GRAY}Нажмите любую клавишу для продолжения...${NC}"
     read -rsn1
-    journalctl -u telemt -f
+    if command -v docker >/dev/null 2>&1 && docker inspect telemt >/dev/null 2>&1; then
+        docker logs -f telemt
+    else
+        journalctl -u telemt -f
+    fi
     echo ""
     echo -e "  ${GRAY}Нажмите любую клавишу для возврата в меню...${NC}"
     read -rsn1
@@ -542,62 +546,21 @@ view_logs() {
 
 # ── Функция установки Telemt ────────────────────────────────
 install_telemt() {
-    echo ""
-    echo -e "  ${BLUE}[i]${NC} Установка Telemt"
-    echo ""
-    echo -e "  ${NC}${BOLD}Выберите какую версию TELEMT вы хотите установить:${NC}"
-    echo -e "  ${GREEN}[Enter]${NC}${BOLD} — установить самую последнюю версию"
-    echo -e "  ${NC}${BOLD}Либо введите любую версию в формате: ${GREEN}3.4.18"
-    echo -e "  ${RED}[N/n]${NC}${BOLD} — назад"
-    echo ""
-    echo -en "  ${NC}${BOLD}Ввод:${NC} "
-    read -r version_input
-
-    if [[ "$version_input" =~ ^[Nn]$ ]]; then
-        echo ""
-        echo -e "  ${GRAY}Установка отменена${NC}"
-        echo ""
-        echo -e "  ${GRAY}${BOLD}Нажмите любую клавишу для возврата в меню...${NC}"
-        read -rsn1
-        return 0
+    local native_installer="$MEKOPR_ROOT/proxys/telemt_native_secure.sh"
+    if [ ! -r "$native_installer" ]; then
+        echo -e "  ${RED}[✗]${NC} Не найден исполняемый нативный установщик: $native_installer"
+        read -rsn1 -p "  Нажмите любую клавишу для возврата..."
+        return 1
     fi
-
-    local install_version="$TELEMT_LOCKED_VERSION"
-    local display_version="$TELEMT_LOCKED_VERSION"
-    
-    if [ -n "$version_input" ]; then
-        if [ "$version_input" = "$TELEMT_LOCKED_VERSION" ]; then
-            install_version="$version_input"
-            display_version="$version_input"
-        else
-            echo ""
-            echo -e "  ${YELLOW}[!]${NC} Разрешена только проверенная версия $TELEMT_LOCKED_VERSION"
-            echo -e "  ${GRAY}Нажмите любую клавишу для возврата в меню...${NC}"
-            read -rsn1
-            return 1
-        fi
-    fi
-
-    echo ""
-    echo -e "  ${BLUE}[i]${NC} Установка Telemt версии ${display_version}..."
-    echo ""
-
-    # ── ПЕРЕХОДИМ В /tmp И УБИРАЕМ INSTALL_DIR ──
-    cd /tmp
-    unset INSTALL_DIR
-
-    require_unverified_installer_opt_in "Telemt standard" || return 1
-    if secure_run_github_script sh telemt/telemt "$TELEMT_REF" install.sh "$install_version"; then
+    if bash "$native_installer"; then
         echo ""
-        echo -e "  ${GREEN}[✓]${NC} Telemt версии ${install_version} успешно установлен"
+        echo -e "  ${GREEN}[✓]${NC} Итоговая проверка нативного Telemt пройдена"
     else
         echo ""
-        echo -e "  ${RED}[✗]${NC} Ошибка установки Telemt версии ${install_version}"
+        echo -e "  ${RED}[✗]${NC} Нативный Telemt не установлен или остановлен из-за ошибки"
     fi
-    
     echo ""
-    echo -e "  ${GRAY}Нажмите любую клавишу для возврата в меню...${NC}"
-    read -rsn1
+    read -rsn1 -p "  Нажмите любую клавишу для возврата..."
 }
 
 # ── Функция установки Telemt в Docker ───────────────────────
@@ -607,7 +570,7 @@ install_telemt_docker() {
     
     if [ -f "$DOCKER_SCRIPT" ]; then
         chmod +x "$DOCKER_SCRIPT"
-        source "$DOCKER_SCRIPT"
+        bash "$DOCKER_SCRIPT"
     else
         echo ""
         echo -e "  ${RED}[✗]${NC} Файл $DOCKER_SCRIPT не найден"
@@ -616,10 +579,10 @@ install_telemt_docker() {
     fi
 }
 
-# ── Функция удаления Telemt (стандартный) ────────────────────
+# ── Функция удаления Telemt (нативный) ───────────────────────
 purge_telemt() {
     echo ""
-    echo -e "  ${RED}${BOLD}ВНИМАНИЕ:${NC} Будет выполнено полное удаление стандартного Telemt!"
+    echo -e "  ${RED}${BOLD}ВНИМАНИЕ:${NC} Будет выполнено полное удаление нативного Telemt!"
     echo ""
     echo -e "  ${BOLD}Будут удалены:${NC}"
     echo -e "  • Все файлы Telemt"
@@ -642,12 +605,20 @@ purge_telemt() {
     echo ""
     echo -e "  ${BLUE}[i]${NC} Удаление Telemt..."
     echo ""
-    if secure_run_github_script sh telemt/telemt "$TELEMT_REF" install.sh purge; then
-        echo ""
-        echo -e "  ${GREEN}[✓]${NC} Telemt успешно удалён"
+    systemctl disable --now telemt.service 2>/dev/null || true
+    rm -f /etc/systemd/system/telemt.service /usr/local/bin/telemt
+    rm -rf /etc/telemt /var/lib/telemt
+    rm -f "$CONFIG_PATH_FILE"
+    if [ -r "$MEKOPR_ROOT/data/rules.sh" ]; then
+        # shellcheck disable=SC1091
+        source "$MEKOPR_ROOT/data/rules.sh"
+        remove_syn_fix >/dev/null 2>&1 || true
+    fi
+    systemctl daemon-reload
+    if systemctl is-active --quiet telemt.service 2>/dev/null || [ -e /usr/local/bin/telemt ]; then
+        echo -e "  ${RED}[✗]${NC} Удаление Telemt не прошло итоговую проверку"
     else
-        echo ""
-        echo -e "  ${RED}[✗]${NC} Ошибка удаления Telemt"
+        echo -e "  ${GREEN}[✓]${NC} Нативный Telemt и его SYN FIX удалены"
     fi
     echo ""
     echo -e "  ${GRAY}Нажмите любую клавишу для возврата в меню...${NC}"
@@ -660,10 +631,9 @@ purge_telemt_docker() {
     echo -e "  ${RED}${BOLD}ВНИМАНИЕ:${NC} Будет выполнено полное удаление Telemt из Docker!"
     echo ""
     echo -e "  ${BOLD}Будут удалены:${NC}"
-    echo -e "  • Контейнеры Telemt и Watchtower"
+    echo -e "  • Контейнер Telemt"
     echo -e "  • Папка проекта (по умолчанию: /root/telemt)"
-    echo -e "  • Образы Telemt и Watchtower"
-    echo -e "  • Все неиспользуемые образы, контейнеры и сети"
+    echo -e "  • Закреплённый образ Telemt (если не используется)"
     echo ""
     echo -e "  ${YELLOW}[!]${NC} Это действие нельзя отменить!"
     
@@ -718,24 +688,16 @@ purge_telemt_docker() {
         echo -e "  ${YELLOW}[!]${NC} Папка не найдена"
     fi
     
-    # 3. Удаляем образы
+    # 3. Удаляем только закреплённый образ Telemt. Другие Docker-ресурсы не трогаем.
     echo -e "  ${BLUE}[i]${NC} Удаление образов..."
-    docker rmi ghcr.io/telemt/telemt:* 2>/dev/null || echo -e "  ${YELLOW}[!]${NC} Образ Telemt не найден"
-    docker rmi containrrr/watchtower 2>/dev/null || echo -e "  ${YELLOW}[!]${NC} Образ Watchtower не найден"
-    
-    # 4. Чистим неиспользуемые образы, контейнеры, сети
-    echo -e "  ${BLUE}[i]${NC} Очистка неиспользуемых ресурсов Docker..."
-    echo -e "  ${DIM}Будут удалены все неиспользуемые образы, контейнеры и сети${NC}"
-    echo -en "  ${BOLD}Выполнить очистку? [y/N]:${NC} "
-    read -r prune_confirm
-    if [[ -z "$prune_confirm" || "$prune_confirm" =~ ^[yY]$ ]]; then
-        docker system prune -af
-        echo -e "  ${GREEN}[✓]${NC} Очистка выполнена"
-    else
-        echo -e "  ${GRAY}Очистка пропущена${NC}"
+    docker image rm "$TELEMT_IMAGE" 2>/dev/null || echo -e "  ${YELLOW}[!]${NC} Образ Telemt не найден или ещё используется"
+    if [ -r "$MEKOPR_ROOT/data/rules.sh" ]; then
+        # shellcheck disable=SC1091
+        source "$MEKOPR_ROOT/data/rules.sh"
+        remove_syn_fix >/dev/null 2>&1 || true
     fi
     
-    # 5. Проверяем что ничего не осталось
+    # 4. Проверяем что ничего не осталось
     echo ""
     echo -e "  ${BLUE}[i]${NC} Проверка остатков..."
     echo -e "  ${BOLD}Контейнеры:${NC}"
@@ -757,7 +719,7 @@ purge_telemt_menu() {
     echo -e "  ${BOLD}УДАЛЕНИЕ TELEMT${NC}"
     echo -e "  ${DIM}===========================${NC}"
     echo ""
-    echo -e "  ${CYAN}[1]${NC}  ${BOLD}Удалить стандартный Telemt${NC}"
+    echo -e "  ${CYAN}[1]${NC}  ${BOLD}Удалить нативный Telemt${NC}"
     echo -e "  ${CYAN}[2]${NC}  ${BOLD}Удалить Telemt из Docker${NC}"
     echo -e "  ${CYAN}[0]${NC}  ${BOLD}Назад${NC}"
     echo ""
@@ -839,7 +801,13 @@ restart_telemt() {
     echo ""
     echo -e "  ${BLUE}[i]${NC} Перезапуск Telemt..."
     echo ""
-    if systemctl restart telemt 2>/dev/null; then
+    if command -v docker >/dev/null 2>&1 && docker inspect telemt >/dev/null 2>&1; then
+        if (cd /root/telemt && docker compose restart telemt >/dev/null); then
+            echo -e "  ${GREEN}[✓]${NC} Telemt Docker успешно перезапущен"
+        else
+            echo -e "  ${RED}[✗]${NC} Не удалось перезапустить контейнер Telemt"
+        fi
+    elif systemctl restart telemt 2>/dev/null; then
         echo -e "  ${GREEN}[✓]${NC} Telemt успешно перезапущен"
     else
         echo -e "  ${YELLOW}[!]${NC} Не удалось перезапустить Telemt (возможно, он не установлен как служба)"
@@ -1123,8 +1091,8 @@ while true; do
         echo ""
     fi
     
-    echo -e "  ${CYAN}[1]${NC}  ${BOLD}Установить/обновить/откатить Telemt${NC}"
-    echo -e "  ${CYAN}[2]${NC}  ${BOLD}Установить Telemt в Docker${NC}"
+    echo -e "  ${CYAN}[1]${NC}  ${BOLD}Установить Telemt нативно${NC} ${DIM}(бинарник + systemd + nftables автоматически)${NC}"
+    echo -e "  ${CYAN}[2]${NC}  ${BOLD}Установить Telemt в Docker${NC} ${DIM}(Docker + контейнер + firewall автоматически)${NC}"
     echo -e "  ${CYAN}[3]${NC}  ${BOLD}Открыть конфиг Telemt${NC}"
     echo -e "  ${CYAN}[4]${NC}  ${BOLD}Перезапустить Telemt${NC}"
     echo -e "  ${CYAN}[5]${NC}  ${BOLD}Обновить путь к конфигу Telemt${NC}"

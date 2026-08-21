@@ -1,6 +1,8 @@
 #!/bin/bash
 # telemt_in_docker1.sh - Установка Telemt в Docker
 
+set -Eeuo pipefail
+
 MEKOPR_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 if [ ! -r "$MEKOPR_ROOT/data/dependencies.env" ]; then
     echo "Не найден lock-файл зависимостей MEKOpr" >&2
@@ -26,6 +28,20 @@ log_success() { echo -e "  ${GREEN}[✓]${NC} $1"; }
 log_error() { echo -e "  ${RED}[✗]${NC} $1" >&2; }
 log_warning() { echo -e "  ${YELLOW}[!]${NC} $1"; }
 
+INSTALL_SUCCEEDED=0
+DOCKER_INSTALL_PATH=""
+cleanup_failed_install() {
+    local code=$?
+    if [ "$code" -ne 0 ] && [ "$INSTALL_SUCCEEDED" -ne 1 ] && \
+       [ "$DOCKER_INSTALL_PATH" = "/root/telemt" ]; then
+        if [ -f "$DOCKER_INSTALL_PATH/docker-compose.yml" ] && command -v docker >/dev/null 2>&1; then
+            (cd "$DOCKER_INSTALL_PATH" && docker compose down >/dev/null 2>&1) || true
+        fi
+        rm -rf -- "$DOCKER_INSTALL_PATH"
+    fi
+}
+trap cleanup_failed_install EXIT
+
 # ── Проверка root ────────────────────────────────────────────
 if [ "$(id -u)" -ne 0 ]; then
     log_error "Требуются права root"
@@ -41,13 +57,32 @@ if [[ ! "$TELEMT_IMAGE" =~ ^ghcr\.io/telemt/telemt@sha256:[0-9a-f]{64}$ ]]; then
 fi
 
 # ── Проверка Docker ──────────────────────────────────────────
-if ! command -v docker &>/dev/null; then
-    log_error "Docker не установлен. Установите Docker Engine из официального репозитория ОС и повторите запуск."
-    return 1 2>/dev/null || exit 1
+if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
+    echo ""
+    log_warning "Docker Engine/Compose не установлен. Он нужен для выбранного режима."
+    echo -en "  ${BOLD}Установить Docker из официального APT-репозитория? [Y/n]:${NC} "
+    read -r install_docker_confirm
+    if [[ "${install_docker_confirm:-y}" =~ ^[Nn]$ ]]; then
+        log_error "Docker-установка отменена; Telemt не установлен"
+        return 1 2>/dev/null || exit 1
+    fi
+    docker_installer="$MEKOPR_ROOT/data/install_docker_engine.sh"
+    if [ ! -r "$docker_installer" ] || ! bash "$docker_installer"; then
+        log_error "Не удалось установить Docker Engine; Telemt не установлен"
+        return 1 2>/dev/null || exit 1
+    fi
 fi
+systemctl enable --now docker >/dev/null 2>&1 || {
+    log_error "Docker service не запустился"
+    return 1 2>/dev/null || exit 1
+}
+docker info >/dev/null 2>&1 || {
+    log_error "Docker daemon недоступен"
+    return 1 2>/dev/null || exit 1
+}
 
 # ── Заголовок ─────────────────────────────────────────────────
-clear
+clear 2>/dev/null || true
 echo ""
 echo -e "  ${BOLD}УСТАНОВКА TELEMT В DOCKER v0.2${NC}"
 echo -e "  ${DIM}================================${NC}"
@@ -55,38 +90,9 @@ echo ""
 echo -e "  Будет установлен Telemt ${GREEN}${TELEMT_VERSION}${NC} в Docker контейнере"
 echo -e "  ${DIM}Версия: ${TELEMT_VERSION}${NC}"
 echo ""
-echo -en "  ${BOLD}Продолжить установку? Y/n:${NC} "
-read -r confirm
-if [[ -n "$confirm" && "$confirm" =~ ^[nN]$ ]]; then
-    log_info "Установка отменена"
-    echo -e "  ${GRAY}Нажмите любую клавишу для возврата...${NC}"
-    read -rsn1
-    return 0 2>/dev/null || exit 0
-fi
 
-# ── 1) Автозапуск Docker ─────────────────────────────────────
-echo ""
-echo -e "  ${BOLD}1. Включить автозапуск Docker при старте системы?${NC}"
-echo -e "  ${DIM}(systemctl enable docker && systemctl start docker)${NC}"
-echo -en "  ${BOLD}Включить? Y/n:${NC} "
-read -r docker_autostart
-if [[ -z "$docker_autostart" || "$docker_autostart" =~ ^[yY]$ ]]; then
-    log_info "Включение автозапуска Docker..."
-    systemctl enable docker 2>/dev/null && systemctl start docker 2>/dev/null
-    log_success "Docker автозапуск включён"
-else
-    log_info "Автозапуск Docker пропущен"
-fi
-
-# ── 2) Путь установки ────────────────────────────────────────
-echo ""
-echo -e "  ${BOLD}2. Путь установки Telemt${NC}"
-echo -e "  ${DIM}По умолчанию: /root/telemt${NC}"
-echo -en "  ${BOLD}Введите путь или нажмите Enter для выбора стандартного:${NC} "
-read -r install_path
-if [ -z "$install_path" ]; then
-    install_path="/root/telemt"
-fi
+# ── 1) Безопасный фиксированный путь установки ───────────────
+install_path="/root/telemt"
 if [[ "$install_path" == *$'\n'* ]] || [[ "$install_path" == *'/../'* ]] || [[ "$install_path" == *'/..' ]]; then
     log_error "Путь установки содержит небезопасные компоненты"
     return 1 2>/dev/null || exit 1
@@ -113,13 +119,18 @@ if [ -L "$install_path" ]; then
     log_error "Путь установки не должен быть символической ссылкой"
     return 1 2>/dev/null || exit 1
 fi
-if [ -e "$install_path/config.toml" ] || [ -e "$install_path/docker-compose.yml" ]; then
-    log_error "В каталоге уже есть конфигурация. Сначала сделайте резервную копию и удалите старую установку."
+if [ -e "$install_path" ] && [ ! -d "$install_path" ]; then
+    log_error "$install_path существует и не является каталогом"
     return 1 2>/dev/null || exit 1
 fi
-log_info "Путь: $install_path"
+if [ -d "$install_path" ] && [ -n "$(find "$install_path" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+    log_error "Каталог $install_path не пуст. Сначала сделайте резервную копию и удалите старую установку."
+    return 1 2>/dev/null || exit 1
+fi
+DOCKER_INSTALL_PATH="$install_path"
+log_info "Путь установки: $install_path"
 
-# ── 3) Порт ───────────────────────────────────────────────────
+# ── 2) Порт ───────────────────────────────────────────────────
 echo ""
 echo -e "  ${BOLD}3. Порт для прокси${NC}"
 echo -e "  ${DIM}По умолчанию: 443${NC}"
@@ -133,56 +144,21 @@ else
     log_warning "Некорректный порт, используем 443"
     port="443"
 fi
+if command -v ss >/dev/null 2>&1 && ss -H -ltn "sport = :$port" 2>/dev/null | grep -q .; then
+    log_error "Порт $port уже занят; Telemt не установлен"
+    return 1 2>/dev/null || exit 1
+fi
 echo -e "  ${GREEN}✓${NC} Использован порт: ${CYAN}${port}${NC}"
 
-# ── 4) Секрет (с циклом) ─────────────────────────────────────
+# ── 3) Секрет ─────────────────────────────────────────────────
 echo ""
-echo -e "  ${BOLD}4. Секрет для доступа к прокси${NC}"
+SECRET=$(openssl rand -hex 16) || {
+    log_error "Не удалось сгенерировать секрет"
+    return 1 2>/dev/null || exit 1
+}
+log_success "Секрет создан автоматически"
 
-SECRET=""
-while true; do
-    # Генерируем секрет при первом проходе или при gen
-    if [ -z "$SECRET" ]; then
-        SECRET=$(openssl rand -hex 16)
-    fi
-    
-    echo -e "  ${DIM}Сгенерирован секрет: ${CYAN}${SECRET}${NC}"
-    echo ""
-    echo -e "  ${BOLD}Варианты:${NC}"
-    echo -e "  ${GREEN}Enter/Y${NC} — использовать сгенерированный секрет"
-    echo -e "  ${CYAN}Ввести вручную${NC} — указать свой секрет"
-    echo -e "  ${RED}gen${NC} — перегенерировать новый секрет"
-    echo ""
-    echo -en "  ${BOLD}Ваш выбор:${NC} "
-    read -r secret_input
-    
-    if [[ "$secret_input" =~ ^[Gg][Ee][Nn]$ ]]; then
-        SECRET=$(openssl rand -hex 16)
-        echo ""
-        echo -e "  ${GREEN}✓${NC} Новый секрет: ${CYAN}${SECRET}${NC}"
-        echo ""
-        # Показываем меню снова с новым секретом
-        continue
-    elif [[ -n "$secret_input" ]] && [[ ! "$secret_input" =~ ^[yY]$ ]]; then
-        if [[ ! "$secret_input" =~ ^[0-9a-fA-F]{32}$ ]]; then
-            log_warning "Секрет должен содержать ровно 32 шестнадцатеричных символа"
-            continue
-        fi
-        SECRET="${secret_input,,}"
-        echo ""
-        echo -e "  ${GREEN}✓${NC} Использован секрет: ${CYAN}${SECRET}${NC}"
-        echo ""
-        break
-    else
-        # Enter или y/Y
-        echo ""
-        echo -e "  ${GREEN}✓${NC} Использован сгенерированный секрет: ${CYAN}${SECRET}${NC}"
-        echo ""
-        break
-    fi
-done
-
-# ── 5) TLS домен ─────────────────────────────────────────────
+# ── 4) TLS домен ─────────────────────────────────────────────
 echo ""
 echo -e "  ${BOLD}5. TLS домен для маскировки${NC}"
 echo -e "  ${DIM}По умолчанию: rutube.ru${NC}"
@@ -198,7 +174,7 @@ else
 fi
 echo -e "  ${GREEN}✓${NC} Использован домен: ${CYAN}${tls_domain}${NC}"
 
-# ── 6) Определяем IP ─────────────────────────────────────────
+# ── 5) Определяем IP ─────────────────────────────────────────
 SERVER_IP=$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)
 if [[ ! "$SERVER_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
     log_error "Не удалось безопасно определить публичный IPv4-адрес"
@@ -207,7 +183,7 @@ fi
 echo ""
 log_info "Обнаружен IP: $SERVER_IP"
 
-# ── 7) Установка ─────────────────────────────────────────────
+# ── 6) Установка ─────────────────────────────────────────────
 echo ""
 log_info "Начинаем установку Telemt ${TELEMT_VERSION} в Docker..."
 echo ""
@@ -259,6 +235,9 @@ tls_front_dir = "tlsfront"
 myuser = "$SECRET"
 EOF
 chmod 0600 config.toml
+printf '%s\n' "$install_path/config.toml" >"$MEKOPR_ROOT/config_path"
+chown root:root "$MEKOPR_ROOT/config_path"
+chmod 0600 "$MEKOPR_ROOT/config_path"
 log_success "config.toml создан"
 
 # Создаем docker-compose.yml
@@ -302,16 +281,60 @@ fi
 # Запускаем
 log_info "Запуск Docker контейнера..."
 if docker compose up -d; then
-    log_success "Telemt успешно запущен"
+    log_info "Контейнер создан; выполняется проверка процесса и порта..."
 else
     log_error "Ошибка запуска Telemt"
     return 1 2>/dev/null || exit 1
 fi
 
+container_ready=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    if [ "$(docker inspect -f '{{.State.Running}}' telemt 2>/dev/null || true)" = "true" ] && \
+       docker port telemt "$port/tcp" 2>/dev/null | grep -Eq "(^|:|\\])${port}$"; then
+        container_ready=1
+        break
+    fi
+    sleep 1
+done
+if [ "$container_ready" -ne 1 ]; then
+    docker compose logs --tail=50 telemt >&2 || true
+    docker compose down >/dev/null 2>&1 || true
+    log_error "TELEMT НЕ УСТАНОВЛЕН: контейнер не прошёл проверку процесса/порта"
+    return 1 2>/dev/null || exit 1
+fi
+log_success "Контейнер работает и порт $port слушается"
+
+# Docker публикует порт через FORWARD. Удаляем прежний проектный nft INPUT
+# filter и ставим iptables-вариант, подключаемый rules.sh к DOCKER-USER.
+RULES_SCRIPT="$MEKOPR_ROOT/data/rules.sh"
+if [ ! -r "$RULES_SCRIPT" ]; then
+    docker compose down >/dev/null 2>&1 || true
+    log_error "TELEMT НЕ УСТАНОВЛЕН: отсутствует $RULES_SCRIPT"
+    return 1 2>/dev/null || exit 1
+fi
+# shellcheck disable=SC1090
+source "$RULES_SCRIPT"
+remove_syn_fix >/dev/null 2>&1 || true
+if ! install_syn_fix -auto_install -port "$port" -type v2; then
+    docker compose down >/dev/null 2>&1 || true
+    remove_syn_fix >/dev/null 2>&1 || true
+    log_error "TELEMT НЕ УСТАНОВЛЕН: не удалось применить Docker SYN FIX"
+    return 1 2>/dev/null || exit 1
+fi
+if ! systemctl is-active --quiet mtpr-synfix.service || \
+   ! iptables -C DOCKER-USER -p tcp -m conntrack --ctorigdstport "$port" -j MTPR_SYNFIX >/dev/null 2>&1; then
+    docker compose down >/dev/null 2>&1 || true
+    remove_syn_fix >/dev/null 2>&1 || true
+    log_error "TELEMT НЕ УСТАНОВЛЕН: цепочка DOCKER-USER не прошла проверку"
+    return 1 2>/dev/null || exit 1
+fi
+log_success "SYN FIX подключён к DOCKER-USER"
+INSTALL_SUCCEEDED=1
+
 # ── 8) Вывод ссылки ──────────────────────────────────────────
 echo ""
 echo -e "  ${BOLD}${GREEN}═════════════════════════════════════════════════${NC}"
-echo -e "  ${BOLD}${GREEN}        TELEMT УСТАНОВЛЕН УСПЕШНО!${NC}"
+echo -e "  ${BOLD}${GREEN} TELEMT УСТАНОВЛЕН: DOCKER + IPTABLES SYN FIX${NC}"
 echo -e "  ${BOLD}${GREEN}═════════════════════════════════════════════════${NC}"
 echo ""
 echo -e "  ${BOLD}ССЫЛКА ДЛЯ ПОДКЛЮЧЕНИЯ В TELEGRAM:${NC}"
@@ -322,7 +345,7 @@ sleep 1
 # Пробуем получить ссылку
 LINK=""
 if command -v jq >/dev/null 2>&1; then
-    LINK=$(curl -fsS --max-time 5 -H "Authorization: $API_AUTH" http://127.0.0.1:9091/v1/users 2>/dev/null | jq -r '.data[].links.tls[]' 2>/dev/null | grep -v "::" | grep -v "0.0.0.0" | head -1)
+    LINK=$(curl -fsS --max-time 5 -H "Authorization: $API_AUTH" http://127.0.0.1:9091/v1/users 2>/dev/null | jq -r '.data[].links.tls[]' 2>/dev/null | grep -v "::" | grep -v "0.0.0.0" | head -1 || true)
 fi
 if [ -n "$LINK" ]; then
     echo -e "  ${CYAN}${LINK}${NC}"
@@ -340,6 +363,7 @@ echo -e "  ${BOLD}IP сервера:${NC} ${CYAN}${SERVER_IP}${NC}"
 echo -e "  ${BOLD}Порт:${NC} ${CYAN}${port}${NC}"
 echo -e "  ${BOLD}TLS домен:${NC} ${CYAN}${tls_domain}${NC}"
 echo -e "  ${BOLD}API:${NC} ${GREEN}только 127.0.0.1, read-only, с Authorization${NC}"
+echo -e "  ${BOLD}Firewall:${NC} ${GREEN}MTPR_SYNFIX подключён к DOCKER-USER${NC}"
 echo ""
 echo -e "  ${BOLD}Команды управления:${NC}"
 echo -e "  ${DIM}  docker compose logs -f  # просмотр логов${NC}"
@@ -350,5 +374,5 @@ echo -e "  ${BOLD}${GREEN}══════════════════
 echo ""
 
 echo -e "  ${GRAY}Нажмите любую клавишу для возврата в меню...${NC}"
-read -rsn1
+read -rsn1 || true
 return 0 2>/dev/null || exit 0

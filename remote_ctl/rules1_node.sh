@@ -177,26 +177,26 @@ if ! iptables -t filter -C INPUT -j "$CHAIN" 2>/dev/null; then
     echo "Цепочка $CHAIN подключена к INPUT"
 fi
 
-if iptables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
-   ! iptables -t filter -C DOCKER-USER -j "$CHAIN" 2>/dev/null; then
-    iptables -t filter -I DOCKER-USER 1 -j "$CHAIN"
-    echo "Цепочка $CHAIN подключена к DOCKER-USER"
-fi
-
 if command -v ip6tables >/dev/null 2>&1; then
     ip6tables -t filter -N "$CHAIN6" 2>/dev/null || true
     ip6tables -t filter -F "$CHAIN6"
     ip6tables -t filter -C INPUT -j "$CHAIN6" 2>/dev/null || ip6tables -t filter -I INPUT 1 -j "$CHAIN6"
-    if ip6tables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
-       ! ip6tables -t filter -C DOCKER-USER -j "$CHAIN6" 2>/dev/null; then
-        ip6tables -t filter -I DOCKER-USER 1 -j "$CHAIN6"
-    fi
 fi
 
 IFS=',' read -ra PORT_ARRAY <<< "$PORTS"
 for PORT in "${PORT_ARRAY[@]}"; do
     PORT=$(echo "$PORT" | xargs)
     [ -z "$PORT" ] && continue
+
+    if iptables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
+       ! iptables -t filter -C DOCKER-USER -p tcp -m conntrack --ctorigdstport "$PORT" -j "$CHAIN" 2>/dev/null; then
+        iptables -t filter -I DOCKER-USER 1 -p tcp -m conntrack --ctorigdstport "$PORT" -j "$CHAIN"
+    fi
+    if command -v ip6tables >/dev/null 2>&1 && \
+       ip6tables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
+       ! ip6tables -t filter -C DOCKER-USER -p tcp -m conntrack --ctorigdstport "$PORT" -j "$CHAIN6" 2>/dev/null; then
+        ip6tables -t filter -I DOCKER-USER 1 -p tcp -m conntrack --ctorigdstport "$PORT" -j "$CHAIN6"
+    fi
 
     iptables -t filter -A "$CHAIN" -p tcp --dport "$PORT" --syn \
         -m tcp --tcp-flags SYN SYN \
@@ -259,26 +259,26 @@ if ! iptables -t filter -C INPUT -j "$CHAIN" 2>/dev/null; then
     echo "Цепочка $CHAIN подключена к INPUT"
 fi
 
-if iptables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
-   ! iptables -t filter -C DOCKER-USER -j "$CHAIN" 2>/dev/null; then
-    iptables -t filter -I DOCKER-USER 1 -j "$CHAIN"
-    echo "Цепочка $CHAIN подключена к DOCKER-USER"
-fi
-
 if command -v ip6tables >/dev/null 2>&1; then
     ip6tables -t filter -N "$CHAIN6" 2>/dev/null || true
     ip6tables -t filter -F "$CHAIN6"
     ip6tables -t filter -C INPUT -j "$CHAIN6" 2>/dev/null || ip6tables -t filter -I INPUT 1 -j "$CHAIN6"
-    if ip6tables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
-       ! ip6tables -t filter -C DOCKER-USER -j "$CHAIN6" 2>/dev/null; then
-        ip6tables -t filter -I DOCKER-USER 1 -j "$CHAIN6"
-    fi
 fi
 
 IFS=',' read -ra PORT_ARRAY <<< "$PORTS"
 for PORT in "${PORT_ARRAY[@]}"; do
     PORT=$(echo "$PORT" | xargs)
     [ -z "$PORT" ] && continue
+
+    if iptables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
+       ! iptables -t filter -C DOCKER-USER -p tcp -m conntrack --ctorigdstport "$PORT" -j "$CHAIN" 2>/dev/null; then
+        iptables -t filter -I DOCKER-USER 1 -p tcp -m conntrack --ctorigdstport "$PORT" -j "$CHAIN"
+    fi
+    if command -v ip6tables >/dev/null 2>&1 && \
+       ip6tables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
+       ! ip6tables -t filter -C DOCKER-USER -p tcp -m conntrack --ctorigdstport "$PORT" -j "$CHAIN6" 2>/dev/null; then
+        ip6tables -t filter -I DOCKER-USER 1 -p tcp -m conntrack --ctorigdstport "$PORT" -j "$CHAIN6"
+    fi
 
     U32_FILTER="32 & 0x000FFFFF = 0x0002FFFF && 40 & 0xFF000000 = 0x02000000 && 44 & 0xFFFF0000 = 0x01030000 && 48 & 0xFFFFFF00 = 0x01010800 && 60 & 0xFFFFFFFF = 0x04020000"
     iptables -t mangle -C PREROUTING -p tcp --dport "$PORT" -m u32 --u32 "$U32_FILTER" -j MARK --set-mark 0x400 2>/dev/null || \
@@ -331,7 +331,8 @@ generate_service_unit() {
 [Unit]
 Description=MTProto SYN FIX rules for Telemt
 After=docker.service ufw.service network.target
-Wants=docker.service ufw.service
+Wants=docker.service
+PartOf=docker.service
 
 [Service]
 Type=oneshot
@@ -584,8 +585,7 @@ chown root:root $NFT_SCRIPT && chmod 0755 $NFT_SCRIPT"
         local service_nft_content=$(cat <<'SERVICE_NFT_EOF'
 [Unit]
 Description=MTProto SYN FIX (nftables) for native proxy services
-After=docker.service network.target
-Wants=docker.service
+After=network.target
 
 [Service]
 Type=oneshot
@@ -737,7 +737,11 @@ remove_syn_fix() {
     ssh_exec "if command -v iptables >/dev/null 2>&1; then
         while iptables -C INPUT -j '$SYNFIX_CHAIN' 2>/dev/null; do iptables -D INPUT -j '$SYNFIX_CHAIN' || break; done
         if iptables -L DOCKER-USER -n >/dev/null 2>&1; then
-            while iptables -C DOCKER-USER -j '$SYNFIX_CHAIN' 2>/dev/null; do iptables -D DOCKER-USER -j '$SYNFIX_CHAIN' || break; done
+            while :; do
+                n=\$(iptables -L DOCKER-USER -n --line-numbers 2>/dev/null | awk '\$2 == \"MTPR_SYNFIX\" { print \$1; exit }')
+                [ -n "\$n" ] || break
+                iptables -D DOCKER-USER "\$n" || break
+            done
         fi
         if iptables -L '$SYNFIX_CHAIN' -n >/dev/null 2>&1; then iptables -F '$SYNFIX_CHAIN'; iptables -X '$SYNFIX_CHAIN'; fi
     fi"
@@ -745,7 +749,11 @@ remove_syn_fix() {
     ssh_exec "if command -v ip6tables >/dev/null 2>&1; then
         while ip6tables -C INPUT -j MTPR_SYNFIX6 2>/dev/null; do ip6tables -D INPUT -j MTPR_SYNFIX6 || break; done
         if ip6tables -L DOCKER-USER -n >/dev/null 2>&1; then
-            while ip6tables -C DOCKER-USER -j MTPR_SYNFIX6 2>/dev/null; do ip6tables -D DOCKER-USER -j MTPR_SYNFIX6 || break; done
+            while :; do
+                n=\$(ip6tables -L DOCKER-USER -n --line-numbers 2>/dev/null | awk '\$2 == \"MTPR_SYNFIX6\" { print \$1; exit }')
+                [ -n "\$n" ] || break
+                ip6tables -D DOCKER-USER "\$n" || break
+            done
         fi
         ip6tables -F MTPR_SYNFIX6 2>/dev/null || true
         ip6tables -X MTPR_SYNFIX6 2>/dev/null || true

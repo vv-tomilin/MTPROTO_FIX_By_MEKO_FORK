@@ -161,12 +161,47 @@ get_mtg_port() {
 
 # ── Функция проверки установки Telemt ──────────────────────
 is_telemt_installed() {
-    command -v telemt >/dev/null 2>&1
+    if command -v telemt >/dev/null 2>&1 && systemctl is-active --quiet telemt.service 2>/dev/null; then
+        return 0
+    fi
+    if command -v docker >/dev/null 2>&1 && \
+       [ "$(docker inspect -f '{{.State.Running}}' telemt 2>/dev/null || true)" = "true" ]; then
+        return 0
+    fi
+    return 1
+}
+
+is_telemt_present_but_stopped() {
+    [ -x /usr/local/bin/telemt ] || [ -f /etc/systemd/system/telemt.service ] || \
+        { command -v docker >/dev/null 2>&1 && docker inspect telemt >/dev/null 2>&1; }
+}
+
+get_telemt_backend() {
+    if command -v telemt >/dev/null 2>&1 && systemctl is-active --quiet telemt.service 2>/dev/null; then
+        echo "нативный"
+    elif command -v docker >/dev/null 2>&1 && \
+         [ "$(docker inspect -f '{{.State.Running}}' telemt 2>/dev/null || true)" = "true" ]; then
+        echo "Docker"
+    else
+        echo "не запущен"
+    fi
+}
+
+is_docker_synfix_attached() {
+    local docker_port=""
+    [ -f /root/telemt/config.toml ] || return 1
+    docker_port=$(get_port_from_config /root/telemt/config.toml)
+    [[ "$docker_port" =~ ^[0-9]+$ ]] || return 1
+    command -v iptables >/dev/null 2>&1 || return 1
+    iptables -C DOCKER-USER -p tcp -m conntrack --ctorigdstport "$docker_port" \
+        -j MTPR_SYNFIX >/dev/null 2>&1
 }
 
 get_telemt_version() {
-    if command -v telemt >/dev/null 2>&1; then
+    if command -v telemt >/dev/null 2>&1 && systemctl is-active --quiet telemt.service 2>/dev/null; then
         telemt --version 2>/dev/null | head -1 | awk '{print $2}'
+    elif command -v docker >/dev/null 2>&1 && docker inspect telemt >/dev/null 2>&1; then
+        echo "$TELEMT_LOCKED_VERSION"
     else
         echo ""
     fi
@@ -192,7 +227,7 @@ detect_all_telemt_configs() {
     fi
     
     local _cf
-    for _cf in /etc/telemt/telemt.toml /etc/telemt/config.toml /etc/telemt.toml /opt/telemt/config.toml /opt/telemt/telemt.toml; do
+        for _cf in /etc/telemt/telemt.toml /root/telemt/config.toml /etc/telemt/config.toml /etc/telemt.toml /opt/telemt/config.toml /opt/telemt/telemt.toml; do
         _cf=$(trim "$_cf")
         if [ -n "$_cf" ] && [ -f "$_cf" ] && ! _is_excluded_path "$_cf" && _looks_like_telemt_config "$_cf"; then
             if ! echo "$SEEN_PATHS" | grep -qF "$_cf"; then
@@ -313,72 +348,20 @@ if [ -f "$CONFIG_PATH_FILE" ] && [ -s "$CONFIG_PATH_FILE" ]; then
         CONFIG_TELEMT=""
     fi
 else
-    TELEMT_VERSION=$(get_telemt_version)
-    
-    echo ""
-    echo -e "  ${NC}${BOLD}Укажите путь к конфигу Telemt${NC}"
-    echo -e "  ${NC}${BOLD}По умолчанию: ${GREEN}${BOLD}[/etc/telemt/telemt.toml]${NC}"
-    
-    if [ -n "$TELEMT_VERSION" ]; then
-        _detected_configs=$(detect_all_telemt_configs)
-        _detected_path=$(echo "$_detected_configs" | cut -d':' -f1)
-        
-        if [ -n "$_detected_path" ] && [ -f "$_detected_path" ]; then
-            echo -e "  ${NC}${BOLD}Телемт найден по пути: ${GREEN}${BOLD}${_detected_path}${NC}"
-            echo -e "  ${NC}${BOLD}Если путь определён верно — нажмите ${GREEN}${BOLD}Enter${NC}"
-        else
-            echo -e "  ${NC}${BOLD}Телемт найден (версия ${TELEMT_VERSION}), но конфиг не обнаружен.${NC}"
-            echo -e "  ${NC}${BOLD}Если путь определён верно — нажмите ${GREEN}${BOLD}Enter${NC}"
-        fi
+    # Первый запуск не должен спрашивать путь к ещё не установленному прокси.
+    # Стандартные нативный и Docker-пути определяются автоматически; нестандартный
+    # путь можно позднее задать из меню Telemt.
+    _detected_configs=$(detect_all_telemt_configs)
+    _detected_path=$(echo "$_detected_configs" | cut -d':' -f1)
+    if [ -n "$_detected_path" ] && [ -f "$_detected_path" ]; then
+        printf '%s\n' "$_detected_path" >"$CONFIG_PATH_FILE"
+        CONFIG_TELEMT="$_detected_path"
     else
-        echo -e "  ${NC}${BOLD}Телемт не найден.${NC}"
-        echo -e "  ${NC}${BOLD}Если Telemt не установлен - нажмите ${GREEN}${BOLD}Enter${NC}"
-    fi
-    
-    echo ""
-    echo -en "  ${BOLD}Ввод:${NC} "
-    read -r CONFIG_TELEMT_INPUT
-
-    if [[ "$CONFIG_TELEMT_INPUT" =~ ^[Nn]$ ]]; then
-        mkdir -p /opt/mtpr-simple
-        echo "skip" > "$CONFIG_PATH_FILE"
+        printf 'skip\n' >"$CONFIG_PATH_FILE"
         CONFIG_TELEMT=""
-    else
-        if [ -z "$CONFIG_TELEMT_INPUT" ]; then
-            _detected_configs=$(detect_all_telemt_configs)
-            _detected_path=$(echo "$_detected_configs" | cut -d':' -f1)
-            
-            if [ -n "$_detected_path" ] && [ -f "$_detected_path" ]; then
-                CONFIG_TELEMT_INPUT="$_detected_path"
-            else
-                if [ -z "$TELEMT_VERSION" ]; then
-                    log_info "Telemt не найден, пропускаем настройку конфига"
-                    mkdir -p /opt/mtpr-simple
-                    echo "skip" > "$CONFIG_PATH_FILE"
-                    CONFIG_TELEMT=""
-                else
-                    CONFIG_TELEMT_INPUT="/etc/telemt/telemt.toml"
-                fi
-            fi
-        fi
-
-        if [ -n "$CONFIG_TELEMT_INPUT" ]; then
-            if [ ! -f "$CONFIG_TELEMT_INPUT" ]; then
-                log_warning "Файл $CONFIG_TELEMT_INPUT не найден."
-                echo -en "  ${BOLD}Сохранить этот путь всё равно? [y/N]:${NC} "
-                confirm_path=""
-                read -r confirm_path
-                if [[ ! "$confirm_path" =~ ^[yY]$ ]]; then
-                    log_error "Путь к конфигу не подтверждён, выход."
-                    exit 1
-                fi
-            fi
-
-            mkdir -p /opt/mtpr-simple
-            echo "$CONFIG_TELEMT_INPUT" > "$CONFIG_PATH_FILE"
-            CONFIG_TELEMT="$CONFIG_TELEMT_INPUT"
-        fi
     fi
+    chown root:root "$CONFIG_PATH_FILE"
+    chmod 0600 "$CONFIG_PATH_FILE"
 fi
 
 
@@ -595,7 +578,7 @@ show_header() {
                 openssl_display="${openssl_version}"
             else
                 openssl_color="${RED}${BOLD}"
-                openssl_display="${openssl_version} ${YELLOW}${BOLD}(не подходит для SelfSteal SNI)${NC}"
+                openssl_display="${openssl_version} ${YELLOW}${BOLD}(SelfSteal-проверка недоступна; установке Telemt не мешает)${NC}"
             fi
             echo -e "  ${BOLD}OpenSSL:${NC} ${openssl_color}${openssl_display}${NC}"
         fi
@@ -634,7 +617,11 @@ show_header() {
     fi
 
     echo -e "  ${BOLD}IP:${NC} ${CYAN}${server_ip}${NC}"
-    echo -e "  ${BOLD}Порты для прокси:${NC} ${CYAN}${open_ports}${NC}"
+    if is_telemt_installed || is_mtprotozig_installed || is_mtg_installed; then
+        echo -e "  ${BOLD}Порты для прокси:${NC} ${CYAN}${open_ports}${NC}"
+    else
+        echo -e "  ${BOLD}Порты для прокси:${NC} ${GRAY}нет работающего прокси${NC}"
+    fi
 
     # ── ПЕРЕЧИТЫВАЕМ ПУТЬ К КОНФИГУ ──────────────────────────
     local current_config_path=""
@@ -707,6 +694,17 @@ show_header() {
         echo -e "  ${BOLD}Zapret2 fix:${NC} ${DIM}недоступно${NC}"
     fi
 
+    if ! is_telemt_installed && ! is_mtprotozig_installed && ! is_mtg_installed; then
+        if [ "$iptables_status" != "inactive" ] || [ "$nft_status" != "inactive" ]; then
+            echo -e "  ${YELLOW}${BOLD}Внимание:${NC} firewall FIX есть, но работающего прокси нет"
+        fi
+    elif [ "$(get_telemt_backend)" = "Docker" ] && \
+         { [ "$iptables_status" != "active" ] || ! is_docker_synfix_attached; }; then
+        echo -e "  ${RED}${BOLD}ОШИБКА:${NC} Docker Telemt работает без подтверждённого DOCKER-USER SYN FIX"
+    elif [ "$(get_telemt_backend)" = "нативный" ] && [ "$nft_status" != "active" ]; then
+        echo -e "  ${RED}${BOLD}ОШИБКА:${NC} нативный Telemt работает без подтверждённого nftables SYN FIX"
+    fi
+
     local telemt_installed=false
     local mtprotozig_installed=false
     local mtg_installed=false
@@ -738,6 +736,7 @@ show_header() {
             
             local _port=$(get_port_from_config "$cfg")
             local _version=$(get_telemt_version)
+            local _backend=$(get_telemt_backend)
             local _online=$(get_telemt_online_for_config "$cfg")
             local _mss_enabled=$(is_mss_enabled_for_config "$cfg" && echo "включен" || echo "отключен")
             local _mss_bulk_enabled=$(is_mss_bulk_enabled_for_config "$cfg" && echo "включен" || echo "отключен")
@@ -772,7 +771,7 @@ show_header() {
             [ "$_synlimit_enabled" = "включен" ] && synlimit_color="${RED}"
             
             echo ""
-            echo -e "  ${BOLD}Telemt V:${NC} ${version_color}${_version}${NC}${port_display}"
+            echo -e "  ${BOLD}Telemt (${_backend}) V:${NC} ${version_color}${_version}${NC}${port_display}"
             echo -e "  ${BOLD}Telemt онлайн:${NC} ${CYAN}${_online}${NC}${BOLD} человек"
             echo -e "  ${BOLD}Встроенный MSS:${NC} ${mss_color}${_mss_enabled}${NC}  |  ${BOLD}MSS_BULK:${NC} ${mss_bulk_color}${_mss_bulk_enabled}${NC}  |  ${BOLD}Synlimit:${NC} ${synlimit_color}${_synlimit_enabled}${NC}"
         done
@@ -821,7 +820,12 @@ show_header() {
 
     # ── ПРОВЕРКА: ЕСТЬ ЛИ ХОТЯ БЫ ОДИН ПРОКСИ ──────────────
     if [ "$telemt_installed" = false ] && [ "$mtprotozig_installed" = false ] && [ "$mtg_installed" = false ]; then
-        echo -e "  ${NC}${BOLD}Прокси: ${GRAY} не установлены${NC}"
+        if is_telemt_present_but_stopped; then
+            echo -e "  ${NC}${BOLD}Прокси: ${RED}Telemt присутствует, но НЕ ЗАПУЩЕН${NC}"
+            echo -e "  ${DIM}Проверьте systemctl status telemt или docker logs telemt${NC}"
+        else
+            echo -e "  ${NC}${BOLD}Прокси: ${GRAY}не установлены${NC}"
+        fi
     fi
 }
 
@@ -896,9 +900,13 @@ main_menu() {
             local iptables_status=$(get_synfix_status)
             local nft_status=$(get_nft_fix_status)
             if [ "$iptables_status" = "inactive" ] && [ "$nft_status" = "inactive" ]; then
-                local item1="${NC}${BOLD}Меню установки ${CYAN}${BOLD}MTProto FIX${NC}"
+                if is_telemt_installed || is_mtprotozig_installed || is_mtg_installed; then
+                    local item1="${NC}${BOLD}Установить SYN FIX для работающего прокси${NC}"
+                else
+                    local item1="${GRAY}${BOLD}SYN FIX недоступен — сначала установите прокси через [3]${NC}"
+                fi
             else
-                local item1="${RED}${BOLD}Удалить Mtproto FIX${NC}"
+                local item1="${RED}${BOLD}Удалить SYN FIX firewall${NC}"
             fi
         else
             local item1="${YELLOW}${BOLD}Установить/Удалить SYN FIX (недоступно)${NC}"
@@ -914,7 +922,7 @@ main_menu() {
         echo -e "  ${CYAN}${BOLD}[1]${NC}  $item1"
         echo -e "  ${CYAN}[2]${NC}  $item2_text"
 		echo -e ""
-        echo -e "  ${CYAN}[3]${NC}  ${NC}${BOLD}Меню прокси и настройки конфигов${NC}"
+        echo -e "  ${CYAN}[3]${NC}  ${GREEN}${BOLD}УСТАНОВИТЬ ПРОКСИ${NC}${BOLD} / управление конфигами${NC}"
         echo -e "  ${CYAN}[4]${NC}  ${NC}${BOLD}Меню управления нодами${NC}"
         echo -e "  ${CYAN}[5]${NC}  ${CYAN}${BOLD}Обновить${NC}${BOLD} скрипт${NC}"
 		echo -e ""
@@ -972,6 +980,12 @@ main_menu() {
                 continue
             fi
             
+            if ! is_telemt_installed && ! is_mtprotozig_installed && ! is_mtg_installed; then
+                log_error "SYN FIX не устанавливает прокси. Сначала выберите [3] → [1] Telemt."
+                echo -e "  ${GRAY}Нажмите любую клавишу для возврата в меню...${NC}"
+                read -rsn1
+                continue
+            fi
             install_syn_fix
             ;;
         2)

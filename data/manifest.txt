@@ -24,7 +24,11 @@ data/dependencies.env|Зафиксированные версии внешних
 
 data/secure_fetch.sh|Безопасная загрузка скриптов по commit SHA
 
+data/install_docker_engine.sh|Проверяемая установка Docker Engine из официального APT-репозитория
+
 proxys/telemt1.sh|Меню Telemt
+
+proxys/telemt_native_secure.sh|Нативная установка Telemt с проверкой SHA-256
 
 proxys/telemt_panel_amirotin.sh|Меню упр панелью для Telemt от amirotin
 

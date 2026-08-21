@@ -143,24 +143,11 @@ if ! iptables -t filter -C INPUT -j "$CHAIN" 2>/dev/null; then
     echo "Цепочка $CHAIN подключена к INPUT"
 fi
 
-# Опубликованные Docker-порты проходят FORWARD, а не INPUT. Docker вызывает
-# DOCKER-USER до собственных разрешающих правил, поэтому используем ту же
-# ограниченную цепочку и для контейнера, если Docker уже создал этот hook.
-if iptables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
-   ! iptables -t filter -C DOCKER-USER -j "$CHAIN" 2>/dev/null; then
-    iptables -t filter -I DOCKER-USER 1 -j "$CHAIN"
-    echo "Цепочка $CHAIN подключена к DOCKER-USER"
-fi
-
 if command -v ip6tables >/dev/null 2>&1; then
     ip6tables -t filter -N "$CHAIN6" 2>/dev/null || true
     ip6tables -t filter -F "$CHAIN6"
     if ! ip6tables -t filter -C INPUT -j "$CHAIN6" 2>/dev/null; then
         ip6tables -t filter -I INPUT 1 -j "$CHAIN6"
-    fi
-    if ip6tables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
-       ! ip6tables -t filter -C DOCKER-USER -j "$CHAIN6" 2>/dev/null; then
-        ip6tables -t filter -I DOCKER-USER 1 -j "$CHAIN6"
     fi
 fi
 
@@ -169,6 +156,20 @@ IFS=',' read -ra PORT_ARRAY <<< "$PORTS"
 for PORT in "${PORT_ARRAY[@]}"; do
     PORT=$(echo "$PORT" | xargs)
     [ -z "$PORT" ] && continue
+
+    # Docker вызывает DOCKER-USER после DNAT. Ограничиваем переход исходным
+    # опубликованным портом, чтобы не затронуть другие контейнеры с тем же
+    # внутренним dport.
+    if iptables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
+       ! iptables -t filter -C DOCKER-USER -p tcp -m conntrack --ctorigdstport "$PORT" -j "$CHAIN" 2>/dev/null; then
+        iptables -t filter -I DOCKER-USER 1 -p tcp -m conntrack --ctorigdstport "$PORT" -j "$CHAIN"
+        echo "Цепочка $CHAIN подключена к DOCKER-USER для внешнего порта $PORT"
+    fi
+    if command -v ip6tables >/dev/null 2>&1 && \
+       ip6tables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
+       ! ip6tables -t filter -C DOCKER-USER -p tcp -m conntrack --ctorigdstport "$PORT" -j "$CHAIN6" 2>/dev/null; then
+        ip6tables -t filter -I DOCKER-USER 1 -p tcp -m conntrack --ctorigdstport "$PORT" -j "$CHAIN6"
+    fi
 
     # Fingerprint не является доверенным признаком. Для совместимости iOS
     # получает только ограниченное повышенное окно, а не безлимитный ACCEPT.
@@ -242,21 +243,11 @@ if ! iptables -t filter -C INPUT -j "$CHAIN" 2>/dev/null; then
     echo "Цепочка $CHAIN подключена к INPUT"
 fi
 
-if iptables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
-   ! iptables -t filter -C DOCKER-USER -j "$CHAIN" 2>/dev/null; then
-    iptables -t filter -I DOCKER-USER 1 -j "$CHAIN"
-    echo "Цепочка $CHAIN подключена к DOCKER-USER"
-fi
-
 if command -v ip6tables >/dev/null 2>&1; then
     ip6tables -t filter -N "$CHAIN6" 2>/dev/null || true
     ip6tables -t filter -F "$CHAIN6"
     if ! ip6tables -t filter -C INPUT -j "$CHAIN6" 2>/dev/null; then
         ip6tables -t filter -I INPUT 1 -j "$CHAIN6"
-    fi
-    if ip6tables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
-       ! ip6tables -t filter -C DOCKER-USER -j "$CHAIN6" 2>/dev/null; then
-        ip6tables -t filter -I DOCKER-USER 1 -j "$CHAIN6"
     fi
 fi
 
@@ -265,6 +256,17 @@ IFS=',' read -ra PORT_ARRAY <<< "$PORTS"
 for PORT in "${PORT_ARRAY[@]}"; do
     PORT=$(echo "$PORT" | xargs)
     [ -z "$PORT" ] && continue
+
+    if iptables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
+       ! iptables -t filter -C DOCKER-USER -p tcp -m conntrack --ctorigdstport "$PORT" -j "$CHAIN" 2>/dev/null; then
+        iptables -t filter -I DOCKER-USER 1 -p tcp -m conntrack --ctorigdstport "$PORT" -j "$CHAIN"
+        echo "Цепочка $CHAIN подключена к DOCKER-USER для внешнего порта $PORT"
+    fi
+    if command -v ip6tables >/dev/null 2>&1 && \
+       ip6tables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
+       ! ip6tables -t filter -C DOCKER-USER -p tcp -m conntrack --ctorigdstport "$PORT" -j "$CHAIN6" 2>/dev/null; then
+        ip6tables -t filter -I DOCKER-USER 1 -p tcp -m conntrack --ctorigdstport "$PORT" -j "$CHAIN6"
+    fi
 
     # Маркировка ограничена TCP и конкретным proxy-портом и не дублируется.
     U32_FILTER="32 & 0x000FFFFF = 0x0002FFFF && 40 & 0xFF000000 = 0x02000000 && 44 & 0xFFFF0000 = 0x01030000 && 48 & 0xFFFFFF00 = 0x01010800 && 60 & 0xFFFFFFFF = 0x04020000"
@@ -328,7 +330,8 @@ generate_service_unit() {
 [Unit]
 Description=MTProto SYN FIX rules for Telemt
 After=docker.service ufw.service network.target
-Wants=docker.service ufw.service
+Wants=docker.service
+PartOf=docker.service
 
 [Service]
 Type=oneshot
@@ -657,8 +660,7 @@ CLASSIC_RULES_EOF
         cat > /etc/systemd/system/mtpr-nft-synfix.service << 'SERVICE_NFT_EOF'
 [Unit]
 Description=MTProto SYN FIX (nftables) for native proxy services
-After=docker.service network.target
-Wants=docker.service
+After=network.target
 
 [Service]
 Type=oneshot
@@ -671,8 +673,13 @@ WantedBy=multi-user.target
 SERVICE_NFT_EOF
 
         systemctl daemon-reload
-        systemctl enable mtpr-nft-synfix.service 2>/dev/null
-        systemctl restart mtpr-nft-synfix.service 2>/dev/null
+        if ! systemctl enable mtpr-nft-synfix.service >/dev/null 2>&1 || \
+           ! systemctl restart mtpr-nft-synfix.service >/dev/null 2>&1 || \
+           ! systemctl is-active --quiet mtpr-nft-synfix.service; then
+            log_error "Сервис mtpr-nft-synfix не прошёл проверку запуска"
+            nft delete table inet mtpr_synfix 2>/dev/null || true
+            return 1
+        fi
 
         log_success "SYN FIX (nftables) успешно установлен на порты: $ports_str"
         if [ "$auto_install" = false ] && [ -r /dev/tty ]; then
@@ -791,8 +798,12 @@ SERVICE_NFT_EOF
                     echo ""
                     
                     PORT="$ports_str" /opt/mtpr-simple/apply-mtpr-synfix.sh
-                    systemctl enable mtpr-synfix.service
-                    systemctl restart mtpr-synfix.service
+                    if ! systemctl enable mtpr-synfix.service >/dev/null 2>&1 || \
+                       ! systemctl restart mtpr-synfix.service >/dev/null 2>&1 || \
+                       ! systemctl is-active --quiet mtpr-synfix.service; then
+                        log_error "Сервис mtpr-synfix не прошёл проверку запуска"
+                        return 1
+                    fi
                     
                     log_success "SYN FIX успешно установлен на порты: $ports_str"
                     if [ -r /dev/tty ]; then
@@ -830,8 +841,12 @@ SERVICE_NFT_EOF
         fi
         return 1
     else
-        systemctl enable mtpr-synfix.service
-        systemctl restart mtpr-synfix.service
+        if ! systemctl enable mtpr-synfix.service >/dev/null 2>&1 || \
+           ! systemctl restart mtpr-synfix.service >/dev/null 2>&1 || \
+           ! systemctl is-active --quiet mtpr-synfix.service; then
+            log_error "Сервис mtpr-synfix не прошёл проверку запуска"
+            return 1
+        fi
         log_success "SYN FIX успешно установлен на порты: $ports_str"
         if [ "$auto_install" = false ] && [ -r /dev/tty ]; then
             echo -e "  ${GRAY}Нажмите любую клавишу...${NC}"
@@ -913,8 +928,7 @@ SMART_RULES_EOF
     cat > /etc/systemd/system/mtpr-nft-synfix.service << 'SERVICE_NFT_EOF'
 [Unit]
 Description=MTProto SYN FIX (nftables) for native proxy services
-After=docker.service network.target
-Wants=docker.service
+After=network.target
 
 [Service]
 Type=oneshot
@@ -927,8 +941,13 @@ WantedBy=multi-user.target
 SERVICE_NFT_EOF
 
     systemctl daemon-reload
-    systemctl enable mtpr-nft-synfix.service 2>/dev/null
-    systemctl restart mtpr-nft-synfix.service 2>/dev/null
+    if ! systemctl enable mtpr-nft-synfix.service >/dev/null 2>&1 || \
+       ! systemctl restart mtpr-nft-synfix.service >/dev/null 2>&1 || \
+       ! systemctl is-active --quiet mtpr-nft-synfix.service; then
+        log_error "Сервис mtpr-nft-synfix не прошёл проверку запуска"
+        nft delete table inet mtpr_synfix 2>/dev/null || true
+        return 1
+    fi
 
     log_success "SYN FIX (nftables) успешно установлен на порты: $ports_str_clean"
     return 0
@@ -946,8 +965,11 @@ remove_syn_fix() {
             iptables -D INPUT -j "$SYNFIX_CHAIN" 2>/dev/null || break
         done
         if iptables -L DOCKER-USER -n >/dev/null 2>&1; then
-            while iptables -C DOCKER-USER -j "$SYNFIX_CHAIN" 2>/dev/null; do
-                iptables -D DOCKER-USER -j "$SYNFIX_CHAIN" 2>/dev/null || break
+            while :; do
+                jump_number=$(iptables -L DOCKER-USER -n --line-numbers 2>/dev/null |
+                    awk -v target="$SYNFIX_CHAIN" '$2 == target { print $1; exit }')
+                [ -n "$jump_number" ] || break
+                iptables -D DOCKER-USER "$jump_number" 2>/dev/null || break
             done
         fi
         if iptables -L "$SYNFIX_CHAIN" -n >/dev/null 2>&1; then
@@ -962,8 +984,11 @@ remove_syn_fix() {
             ip6tables -D INPUT -j MTPR_SYNFIX6 2>/dev/null || break
         done
         if ip6tables -L DOCKER-USER -n >/dev/null 2>&1; then
-            while ip6tables -C DOCKER-USER -j MTPR_SYNFIX6 2>/dev/null; do
-                ip6tables -D DOCKER-USER -j MTPR_SYNFIX6 2>/dev/null || break
+            while :; do
+                jump_number6=$(ip6tables -L DOCKER-USER -n --line-numbers 2>/dev/null |
+                    awk '$2 == "MTPR_SYNFIX6" { print $1; exit }')
+                [ -n "$jump_number6" ] || break
+                ip6tables -D DOCKER-USER "$jump_number6" 2>/dev/null || break
             done
         fi
         if ip6tables -L MTPR_SYNFIX6 -n >/dev/null 2>&1; then
