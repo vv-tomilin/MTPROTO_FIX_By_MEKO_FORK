@@ -177,10 +177,20 @@ if ! iptables -t filter -C INPUT -j "$CHAIN" 2>/dev/null; then
     echo "Цепочка $CHAIN подключена к INPUT"
 fi
 
+if iptables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
+   ! iptables -t filter -C DOCKER-USER -j "$CHAIN" 2>/dev/null; then
+    iptables -t filter -I DOCKER-USER 1 -j "$CHAIN"
+    echo "Цепочка $CHAIN подключена к DOCKER-USER"
+fi
+
 if command -v ip6tables >/dev/null 2>&1; then
     ip6tables -t filter -N "$CHAIN6" 2>/dev/null || true
     ip6tables -t filter -F "$CHAIN6"
     ip6tables -t filter -C INPUT -j "$CHAIN6" 2>/dev/null || ip6tables -t filter -I INPUT 1 -j "$CHAIN6"
+    if ip6tables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
+       ! ip6tables -t filter -C DOCKER-USER -j "$CHAIN6" 2>/dev/null; then
+        ip6tables -t filter -I DOCKER-USER 1 -j "$CHAIN6"
+    fi
 fi
 
 IFS=',' read -ra PORT_ARRAY <<< "$PORTS"
@@ -249,10 +259,20 @@ if ! iptables -t filter -C INPUT -j "$CHAIN" 2>/dev/null; then
     echo "Цепочка $CHAIN подключена к INPUT"
 fi
 
+if iptables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
+   ! iptables -t filter -C DOCKER-USER -j "$CHAIN" 2>/dev/null; then
+    iptables -t filter -I DOCKER-USER 1 -j "$CHAIN"
+    echo "Цепочка $CHAIN подключена к DOCKER-USER"
+fi
+
 if command -v ip6tables >/dev/null 2>&1; then
     ip6tables -t filter -N "$CHAIN6" 2>/dev/null || true
     ip6tables -t filter -F "$CHAIN6"
     ip6tables -t filter -C INPUT -j "$CHAIN6" 2>/dev/null || ip6tables -t filter -I INPUT 1 -j "$CHAIN6"
+    if ip6tables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
+       ! ip6tables -t filter -C DOCKER-USER -j "$CHAIN6" 2>/dev/null; then
+        ip6tables -t filter -I DOCKER-USER 1 -j "$CHAIN6"
+    fi
 fi
 
 IFS=',' read -ra PORT_ARRAY <<< "$PORTS"
@@ -375,24 +395,22 @@ install_syn_fix() {
         echo -e "  ${BOLD}Выберите вариант правил ниже"
         echo -e "  ${DIM}══════════════════════════════════════════════"
         echo ""
-        echo -e "  ${GREEN}[1]${NC}  ${BOLD}V3 фикс iptables${NC} (Разделение устройств с помощью u32 по байтам из пакета) — ${GREEN}${BOLD}рекомендуется${NC}"
-        echo -e "${DIM}  Если совпало -> это ios и принимаем пакеты без лимита"
-        echo -e "${DIM}  Если не совпало -> это другое ус-во и ставим SYN 1 пакет в 1.1 сек."
+        echo -e "  ${GREEN}[1]${NC}  ${BOLD}V3 фикс iptables${NC} (u32; Docker через DOCKER-USER; требуется xt_u32)"
+        echo -e "${DIM}  Совпавший fingerprint -> до 300 SYN/мин на IP, burst 10"
+        echo -e "${DIM}  Остальные -> до 54 SYN/мин на IP, burst 1"
         echo -e ""
         echo -e "  ${CYAN}[2]${NC}  ${BOLD}V4 фикс zapret2 ${NC} — быстрый (на этапе тестирования)${NC}"
         echo -e "${DIM}  Работает с помощью zapret2 на уровне TCP-пакетов: ${NC}"
         echo -e "${DIM}  disorder + badsum + window control"
         echo ""
-        echo -e "  ${YELLOW}[3]${NC}  ${BOLD}v2 фикс iptables${NC} (Разделение устройств определяя их TTL+Length)"
-        echo -e "${DIM}  Если TTL <65 и length 64 -> это ios и принимаем пакеты без лимита"
-        echo -e "${DIM}  Иначе -> это другое ус-во и ставим SYN 1 пакет в 1.1 сек."
+        echo -e "  ${YELLOW}[3]${NC}  ${BOLD}v2 фикс iptables${NC} (TTL+Length fingerprint)"
+        echo -e "${DIM}  Совпавший fingerprint -> до 300 SYN/мин на IP, burst 10"
+        echo -e "${DIM}  Остальные -> до 54 SYN/мин на IP, burst 1"
         echo ""
-        echo -e "  ${GREEN}[4]${NC}  ${BOLD}v3 фикс nftables${GREEN}${BOLD} - рекомендуется (Совместим с Docker)${NC}"
-        echo -e "${DIM}  Если совпало -> это ios и принимаем пакеты без лимита"
-        echo -e "${DIM}  Если не совпало -> это другое ус-во и ставим SYN 1 пакет в 1.1 сек."
-        echo -e "  ${YELLOW}[5]${NC}  ${BOLD}v2 фикс nftables${NC}${BOLD}${NC}${BOLD} (Совместим с Docker)"
-        echo -e "${DIM}  Если TTL <65 и length 64 -> это ios и принимаем пакеты без лимита"
-        echo -e "${DIM}  Иначе -> это другое ус-во и ставим SYN 1 пакет в 1.1 сек."
+        echo -e "  ${GREEN}[4]${NC}  ${BOLD}v3 фикс nftables${GREEN}${BOLD} (только нативный прокси, не Docker)${NC}"
+        echo -e "${DIM}  Fingerprint + конечные лимиты на IP"
+        echo -e "  ${YELLOW}[5]${NC}  ${BOLD}v2 фикс nftables${NC}${BOLD} (только нативный прокси, не Docker)"
+        echo -e "${DIM}  Единый лимит 54 SYN/мин на IP, burst 1"
         echo ""
         echo -en "  ${NC}${BOLD}Ввод (По умолчанию - ${GREEN}${BOLD}1 или enter${NC}${BOLD}):${NC} "
         read -r fix_choice
@@ -456,6 +474,17 @@ install_syn_fix() {
         echo ""
         read -rsn1 -p "  Нажмите любую клавишу..."
         return 1
+    fi
+
+    if [ "$FIX_TYPE" = "new" ] || [ "$FIX_TYPE" = "old" ]; then
+        if ! ssh_exec "command -v iptables >/dev/null 2>&1 && command -v ip6tables >/dev/null 2>&1"; then
+            log_error "На удалённом сервере отсутствует iptables/ip6tables. Частичные правила не создавались."
+            return 1
+        fi
+        if [ "$FIX_TYPE" = "new" ] && ! ssh_exec "iptables -m u32 -h >/dev/null 2>&1"; then
+            log_error "На удалённом сервере недоступно расширение xt_u32."
+            return 1
+        fi
     fi
 
     local ports_str=$(IFS=,; echo "${valid_ports[*]}")
@@ -554,7 +583,7 @@ chown root:root $NFT_SCRIPT && chmod 0755 $NFT_SCRIPT"
         # Создаём systemd сервис
         local service_nft_content=$(cat <<'SERVICE_NFT_EOF'
 [Unit]
-Description=MTProto SYN FIX (nftables) for Telemt/Docker
+Description=MTProto SYN FIX (nftables) for native proxy services
 After=docker.service network.target
 Wants=docker.service
 
@@ -705,18 +734,23 @@ remove_syn_fix() {
     ssh_exec "systemctl stop mtpr-synfix.service 2>/dev/null || true"
     ssh_exec "systemctl disable mtpr-synfix.service 2>/dev/null || true"
 
-    if ssh_exec "iptables -C INPUT -j \"$SYNFIX_CHAIN\" 2>/dev/null"; then
-        ssh_exec "iptables -D INPUT -j \"$SYNFIX_CHAIN\""
-        log_info "Цепочка $SYNFIX_CHAIN отключена от INPUT"
-    fi
+    ssh_exec "if command -v iptables >/dev/null 2>&1; then
+        while iptables -C INPUT -j '$SYNFIX_CHAIN' 2>/dev/null; do iptables -D INPUT -j '$SYNFIX_CHAIN' || break; done
+        if iptables -L DOCKER-USER -n >/dev/null 2>&1; then
+            while iptables -C DOCKER-USER -j '$SYNFIX_CHAIN' 2>/dev/null; do iptables -D DOCKER-USER -j '$SYNFIX_CHAIN' || break; done
+        fi
+        if iptables -L '$SYNFIX_CHAIN' -n >/dev/null 2>&1; then iptables -F '$SYNFIX_CHAIN'; iptables -X '$SYNFIX_CHAIN'; fi
+    fi"
 
-    if ssh_exec "iptables -L \"$SYNFIX_CHAIN\" -n >/dev/null 2>&1"; then
-        ssh_exec "iptables -F \"$SYNFIX_CHAIN\""
-        ssh_exec "iptables -X \"$SYNFIX_CHAIN\""
-        log_info "Цепочка $SYNFIX_CHAIN удалена"
-    fi
-
-    ssh_exec "if command -v ip6tables >/dev/null 2>&1; then ip6tables -D INPUT -j MTPR_SYNFIX6 2>/dev/null || true; ip6tables -F MTPR_SYNFIX6 2>/dev/null || true; ip6tables -X MTPR_SYNFIX6 2>/dev/null || true; fi"
+    ssh_exec "if command -v ip6tables >/dev/null 2>&1; then
+        while ip6tables -C INPUT -j MTPR_SYNFIX6 2>/dev/null; do ip6tables -D INPUT -j MTPR_SYNFIX6 || break; done
+        if ip6tables -L DOCKER-USER -n >/dev/null 2>&1; then
+            while ip6tables -C DOCKER-USER -j MTPR_SYNFIX6 2>/dev/null; do ip6tables -D DOCKER-USER -j MTPR_SYNFIX6 || break; done
+        fi
+        ip6tables -F MTPR_SYNFIX6 2>/dev/null || true
+        ip6tables -X MTPR_SYNFIX6 2>/dev/null || true
+    fi"
+    log_info "Цепочки SYN FIX удалены из INPUT/DOCKER-USER"
 
     # Неотличимое пользовательское SSH ACCEPT автоматически не удаляем, чтобы
     # не оборвать единственный административный доступ.

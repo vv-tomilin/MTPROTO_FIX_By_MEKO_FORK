@@ -129,6 +129,14 @@ sudo mekopr
 
 Сначала установите Docker Engine из официального репозитория Docker для вашей ОС. Не используйте `get.docker.com | sh`. Инструкция: <https://docs.docker.com/engine/install/>.
 
+Docker предупреждает, что опубликованные порты контейнеров могут обходить UFW, а
+пользовательские правила для Docker следует размещать в цепочке `DOCKER-USER`.
+Поэтому варианты SYN FIX на чистом `nftables` предназначены только для нативного
+proxy-процесса. Для Docker сначала установите и запустите Docker, затем Telemt,
+после чего используйте hardening-вариант `iptables`: он подключает проектную
+цепочку одновременно к `INPUT` и `DOCKER-USER`. Если `xt_u32` недоступен,
+используйте вариант `iptables` без u32.
+
 Проверьте установку:
 
 ```bash
@@ -201,9 +209,14 @@ sudo stat -c '%U:%G %a %n' /root/telemt/config.toml /root/telemt/docker-compose.
 
 ```bash
 sudo nft list ruleset
-sudo iptables-save
-sudo ip6tables-save
+command -v iptables-save >/dev/null && sudo iptables-save
+command -v ip6tables-save >/dev/null && sudo ip6tables-save
+sudo iptables -S DOCKER-USER | grep MTPR_SYNFIX
 ```
+
+Для Docker последняя команда должна показать переход в `MTPR_SYNFIX`. Одного
+перехода из `INPUT` недостаточно: опубликованный контейнерный порт проходит по
+пути `FORWARD`/`DOCKER-USER`.
 
 Не должно быть безусловного правила вида:
 

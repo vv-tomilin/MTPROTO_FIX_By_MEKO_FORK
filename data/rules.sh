@@ -143,11 +143,24 @@ if ! iptables -t filter -C INPUT -j "$CHAIN" 2>/dev/null; then
     echo "Цепочка $CHAIN подключена к INPUT"
 fi
 
+# Опубликованные Docker-порты проходят FORWARD, а не INPUT. Docker вызывает
+# DOCKER-USER до собственных разрешающих правил, поэтому используем ту же
+# ограниченную цепочку и для контейнера, если Docker уже создал этот hook.
+if iptables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
+   ! iptables -t filter -C DOCKER-USER -j "$CHAIN" 2>/dev/null; then
+    iptables -t filter -I DOCKER-USER 1 -j "$CHAIN"
+    echo "Цепочка $CHAIN подключена к DOCKER-USER"
+fi
+
 if command -v ip6tables >/dev/null 2>&1; then
     ip6tables -t filter -N "$CHAIN6" 2>/dev/null || true
     ip6tables -t filter -F "$CHAIN6"
     if ! ip6tables -t filter -C INPUT -j "$CHAIN6" 2>/dev/null; then
         ip6tables -t filter -I INPUT 1 -j "$CHAIN6"
+    fi
+    if ip6tables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
+       ! ip6tables -t filter -C DOCKER-USER -j "$CHAIN6" 2>/dev/null; then
+        ip6tables -t filter -I DOCKER-USER 1 -j "$CHAIN6"
     fi
 fi
 
@@ -205,7 +218,7 @@ done
 
 APPLY_SCRIPT_EOF
     else
-        # Новый вариант (u32 + ACCEPT без лимита)
+        # Новый вариант (u32 + ограниченное повышенное окно для совпавшего fingerprint)
         cat >/opt/mtpr-simple/apply-mtpr-synfix.sh <<'APPLY_SCRIPT_EOF'
 #!/bin/bash
 set -e
@@ -229,11 +242,21 @@ if ! iptables -t filter -C INPUT -j "$CHAIN" 2>/dev/null; then
     echo "Цепочка $CHAIN подключена к INPUT"
 fi
 
+if iptables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
+   ! iptables -t filter -C DOCKER-USER -j "$CHAIN" 2>/dev/null; then
+    iptables -t filter -I DOCKER-USER 1 -j "$CHAIN"
+    echo "Цепочка $CHAIN подключена к DOCKER-USER"
+fi
+
 if command -v ip6tables >/dev/null 2>&1; then
     ip6tables -t filter -N "$CHAIN6" 2>/dev/null || true
     ip6tables -t filter -F "$CHAIN6"
     if ! ip6tables -t filter -C INPUT -j "$CHAIN6" 2>/dev/null; then
         ip6tables -t filter -I INPUT 1 -j "$CHAIN6"
+    fi
+    if ip6tables -t filter -L DOCKER-USER -n >/dev/null 2>&1 && \
+       ! ip6tables -t filter -C DOCKER-USER -j "$CHAIN6" 2>/dev/null; then
+        ip6tables -t filter -I DOCKER-USER 1 -j "$CHAIN6"
     fi
 fi
 
@@ -425,24 +448,24 @@ install_syn_fix() {
         echo -e "  ${BOLD}Выберите вариант правил ниже"
         echo -e "  ${DIM}══════════════════════════════════════════════"
         echo ""
-        echo -e "  ${GREEN}[1]${NC}  ${BOLD}V3 фикс iptables${NC} (Разделение устройств с помощью u32 по байтам из пакета) — ${GREEN}${BOLD}рекомендуется${NC}"
-        echo -e "${DIM}  Если совпало -> это ios и принимаем пакеты без лимита"
-        echo -e "${DIM}  Если не совпало -> это другое ус-во и ставим SYN 1 пакет в 1.1 сек."
+        echo -e "  ${GREEN}[1]${NC}  ${BOLD}V3 фикс iptables${NC} (u32; Docker через DOCKER-USER; требуется xt_u32)"
+        echo -e "${DIM}  Совпавший fingerprint -> до 300 SYN/мин на IP, burst 10"
+        echo -e "${DIM}  Остальные -> до 54 SYN/мин на IP, burst 1; превышение отклоняется"
         echo -e ""
         echo -e "  ${CYAN}[2]${NC}  ${BOLD}V4 фикс zapret2 ${NC} — быстрый (на этапе тестирования)${NC}"
         echo -e "${DIM}  Работает с помощью zapret2 на уровне TCP-пакетов: ${NC}"
         echo -e "${DIM}  disorder + badsum + window control"
         echo ""
-        echo -e "  ${YELLOW}[3]${NC}  ${BOLD}v2 фикс iptables${NC} (Разделение устройств определяя их TTL+Length)"
-        echo -e "${DIM}  Если TTL <65 и length 64 -> это ios и принимаем пакеты без лимита"
-        echo -e "${DIM}  Иначе -> это другое ус-во и ставим SYN 1 пакет в 1.1 сек."
+        echo -e "  ${YELLOW}[3]${NC}  ${BOLD}v2 фикс iptables${NC} (TTL+Length fingerprint)"
+        echo -e "${DIM}  Совпавший fingerprint -> до 300 SYN/мин на IP, burst 10"
+        echo -e "${DIM}  Остальные -> до 54 SYN/мин на IP, burst 1; превышение отклоняется"
         echo ""
-        echo -e "  ${GREEN}[4]${NC}  ${BOLD}v3 фикс nftables${GREEN}${BOLD} - рекомендуется (Совместим с Docker)${NC}"
-        echo -e "${DIM}  Если совпало -> это ios и принимаем пакеты без лимита"
-        echo -e "${DIM}  Если не совпало -> это другое ус-во и ставим SYN 1 пакет в 1.1 сек."
-        echo -e "  ${YELLOW}[5]${NC}  ${BOLD}v2 фикс nftables${NC}${BOLD}${NC}${BOLD} (Совместим с Docker)"
-        echo -e "${DIM}  Если TTL <65 и length 64 -> это ios и принимаем пакеты без лимита"
-        echo -e "${DIM}  Иначе -> это другое ус-во и ставим SYN 1 пакет в 1.1 сек."
+        echo -e "  ${GREEN}[4]${NC}  ${BOLD}v3 фикс nftables${GREEN}${BOLD} (только нативный прокси, не Docker)${NC}"
+        echo -e "${DIM}  Совпавший fingerprint -> до 300 SYN/мин на IP, burst 10"
+        echo -e "${DIM}  Остальные -> до 54 SYN/мин на IP, burst 1; превышение отклоняется"
+        echo -e "  ${YELLOW}[5]${NC}  ${BOLD}v2 фикс nftables${NC}${BOLD} (только нативный прокси, не Docker)"
+        echo -e "${DIM}  Все устройства -> до 54 SYN/мин на IP, burst 1"
+        echo -e "${DIM}  Превышение лимита отклоняется TCP reset"
         echo ""
         if [ -r /dev/tty ]; then
             echo -en "  ${NC}${BOLD}Ввод (По умолчанию - ${GREEN}${BOLD}1 или enter${NC}${BOLD}):${NC} "
@@ -505,6 +528,25 @@ install_syn_fix() {
             read -rsn1 </dev/tty
         fi
         return 1
+    fi
+
+    # Не создаём unit, apply-script и частичные цепочки, если выбранный backend
+    # отсутствует. На минимальных Ubuntu/Debian nftables может быть установлен
+    # без совместимых команд iptables/ip6tables.
+    if [ "$FIX_TYPE" = "new" ] || [ "$FIX_TYPE" = "old" ]; then
+        if ! command -v iptables >/dev/null 2>&1; then
+            log_error "iptables не установлен; выбранный вариант применить невозможно."
+            log_info "Установите iptables осознанно либо выберите вариант nftables."
+            return 1
+        fi
+        if ! command -v ip6tables >/dev/null 2>&1; then
+            log_error "ip6tables не установлен: IPv6 остался бы без SYN-фильтрации."
+            return 1
+        fi
+        if [ "$FIX_TYPE" = "new" ] && ! iptables -m u32 -h >/dev/null 2>&1; then
+            log_error "Расширение xt_u32 недоступно; вариант V3 iptables применить невозможно."
+            return 1
+        fi
     fi
 
     local ports_str=$(IFS=,; echo "${valid_ports[*]}")
@@ -614,7 +656,7 @@ CLASSIC_RULES_EOF
 
         cat > /etc/systemd/system/mtpr-nft-synfix.service << 'SERVICE_NFT_EOF'
 [Unit]
-Description=MTProto SYN FIX (nftables) for Telemt/Docker
+Description=MTProto SYN FIX (nftables) for native proxy services
 After=docker.service network.target
 Wants=docker.service
 
@@ -674,8 +716,14 @@ SERVICE_NFT_EOF
 
     local apply_output
     local apply_exit_code
-    apply_output=$(PORT="$ports_str" /opt/mtpr-simple/apply-mtpr-synfix.sh 2>&1)
-    apply_exit_code=$?
+    # main.sh uses `set -e`: a bare failing command substitution would terminate
+    # the whole menu before we can show the real iptables error or offer a safe
+    # fallback. Commands used as an `if` condition are exempt from errexit.
+    if apply_output=$(PORT="$ports_str" /opt/mtpr-simple/apply-mtpr-synfix.sh 2>&1); then
+        apply_exit_code=0
+    else
+        apply_exit_code=$?
+    fi
 
     if [ "$FIX_TYPE" = "new" ] && [ $apply_exit_code -ne 0 ] && echo "$apply_output" | grep -q "u32"; then
         if [ "$auto_install" = false ]; then
@@ -864,7 +912,7 @@ SMART_RULES_EOF
 
     cat > /etc/systemd/system/mtpr-nft-synfix.service << 'SERVICE_NFT_EOF'
 [Unit]
-Description=MTProto SYN FIX (nftables) for Telemt/Docker
+Description=MTProto SYN FIX (nftables) for native proxy services
 After=docker.service network.target
 Wants=docker.service
 
@@ -893,20 +941,30 @@ remove_syn_fix() {
     systemctl stop mtpr-synfix.service 2>/dev/null || true
     systemctl disable mtpr-synfix.service 2>/dev/null || true
 
-    if iptables -C INPUT -j "$SYNFIX_CHAIN" 2>/dev/null; then
-        iptables -D INPUT -j "$SYNFIX_CHAIN"
-        log_info "Цепочка $SYNFIX_CHAIN отключена от INPUT"
-    fi
-
-    if iptables -L "$SYNFIX_CHAIN" -n >/dev/null 2>&1; then
-        iptables -F "$SYNFIX_CHAIN"
-        iptables -X "$SYNFIX_CHAIN"
-        log_info "Цепочка $SYNFIX_CHAIN удалена"
+    if command -v iptables >/dev/null 2>&1; then
+        while iptables -C INPUT -j "$SYNFIX_CHAIN" 2>/dev/null; do
+            iptables -D INPUT -j "$SYNFIX_CHAIN" 2>/dev/null || break
+        done
+        if iptables -L DOCKER-USER -n >/dev/null 2>&1; then
+            while iptables -C DOCKER-USER -j "$SYNFIX_CHAIN" 2>/dev/null; do
+                iptables -D DOCKER-USER -j "$SYNFIX_CHAIN" 2>/dev/null || break
+            done
+        fi
+        if iptables -L "$SYNFIX_CHAIN" -n >/dev/null 2>&1; then
+            iptables -F "$SYNFIX_CHAIN"
+            iptables -X "$SYNFIX_CHAIN"
+            log_info "Цепочка $SYNFIX_CHAIN удалена из INPUT/DOCKER-USER"
+        fi
     fi
 
     if command -v ip6tables >/dev/null 2>&1; then
-        if ip6tables -C INPUT -j MTPR_SYNFIX6 2>/dev/null; then
-            ip6tables -D INPUT -j MTPR_SYNFIX6 2>/dev/null || true
+        while ip6tables -C INPUT -j MTPR_SYNFIX6 2>/dev/null; do
+            ip6tables -D INPUT -j MTPR_SYNFIX6 2>/dev/null || break
+        done
+        if ip6tables -L DOCKER-USER -n >/dev/null 2>&1; then
+            while ip6tables -C DOCKER-USER -j MTPR_SYNFIX6 2>/dev/null; do
+                ip6tables -D DOCKER-USER -j MTPR_SYNFIX6 2>/dev/null || break
+            done
         fi
         if ip6tables -L MTPR_SYNFIX6 -n >/dev/null 2>&1; then
             ip6tables -F MTPR_SYNFIX6 2>/dev/null || true
@@ -919,13 +977,14 @@ remove_syn_fix() {
     local ssh_port
     ssh_port=$(sshd -T 2>/dev/null | awk '/^port / { print $2; exit }')
     ssh_port=${ssh_port:-22}
-    if iptables -C INPUT -p tcp --dport "$ssh_port" -j ACCEPT 2>/dev/null; then
+    if command -v iptables >/dev/null 2>&1 && \
+       iptables -C INPUT -p tcp --dport "$ssh_port" -j ACCEPT 2>/dev/null; then
         log_warning "Обнаружено глобальное SSH ACCEPT на порту $ssh_port. Проверьте его и удалите вручную из резервной SSH-сессии."
     fi
 
     local u32_filter="32 & 0x000FFFFF = 0x0002FFFF && 40 & 0xFF000000 = 0x02000000 && 44 & 0xFFFF0000 = 0x01030000 && 48 & 0xFFFFFF00 = 0x01010800 && 60 & 0xFFFFFFFF = 0x04020000"
 
-    if [ -f "$PORT_FILE" ]; then
+    if command -v iptables >/dev/null 2>&1 && [ -f "$PORT_FILE" ]; then
         local saved_ports port
         saved_ports=$(cat "$PORT_FILE")
         IFS=',' read -ra _saved_port_array <<< "$saved_ports"
@@ -938,14 +997,15 @@ remove_syn_fix() {
         done
     fi
     
-    if iptables -t mangle -L PREROUTING -n 2>/dev/null | grep -q "$u32_filter"; then
+    if command -v iptables >/dev/null 2>&1 && \
+       iptables -t mangle -L PREROUTING -n 2>/dev/null | grep -q "$u32_filter"; then
         log_info "Обнаружены правила u32 в mangle (iptables), удаляем..."
         iptables -t mangle -L PREROUTING --line-numbers 2>/dev/null | grep "$u32_filter" | awk '{print $1}' | tac | while read -r num; do
             if [ -n "$num" ]; then
                 iptables -t mangle -D PREROUTING "$num" 2>/dev/null && log_info "Удалено правило u32 (номер $num)"
             fi
         done
-    else
+    elif command -v iptables >/dev/null 2>&1; then
         log_info "Правил с нашим u32-фильтром в iptables/mangle не найдено"
     fi
 
